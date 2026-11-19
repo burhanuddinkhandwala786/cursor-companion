@@ -322,16 +322,18 @@ function parseModelJsonResponse(rawText) {
 }
 
 function buildByokInstruction(actionMode) {
-  const baseVerification =
-    'Accuracy is #1. Solve step-by-step internally before outputting JSON. Watch for NOT/EXCEPT/INCORRECT and unit conversions. Read ALL options (A/B/C/D/E) before choosing; if two options hold and a combined option exists ("both A and B", "both B and C", "all of the above"), you MUST pick the combined option. Do not trust pre-selected radio buttons. Only if question stem or options are physically cut off/illegible, return cursor_pill "Unclear crop — retry".';
-
   if (actionMode === "rewrite") {
-    return 'Rewrite cleanly and politely while keeping exact meaning. Return ONLY raw JSON: {"detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}';
+    return 'Rewrite cleanly and politely while keeping exact meaning. Return ONLY raw JSON: {"verification":"tone checked","detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}';
   }
   if (actionMode === "explain") {
-    return 'Explain clearly in plain English without guessing. Return ONLY raw JSON: {"detected_type":"CONCEPT_EXPLAIN","cursor_pill":"1-line summary","copy_value":"1-line summary","expanded_note":"3 short bullets"}';
+    return 'Explain clearly in plain English without guessing. Return ONLY raw JSON: {"verification":"facts checked","detected_type":"CONCEPT_EXPLAIN","cursor_pill":"1-line summary","copy_value":"1-line summary","expanded_note":"3 short bullets"}';
   }
-  return `${baseVerification} Return ONLY raw JSON: {"detected_type":"MCQ","cursor_pill":"B. Exact option text","copy_value":"","expanded_note":"1-sentence verification"}`;
+  return [
+    "You are a 10/10 academic and engineering verification engine. Accuracy is strictly #1.",
+    'In the "verification" field FIRST, briefly solve the problem, check for negations (NOT/EXCEPT/INCORRECT), and check ALL options (A/B/C/D/E) including combined choices ("both A and B", "both B and C", "all of the above"). Do NOT trust highlighted radio buttons.',
+    'Only AFTER "verification", output the exact matching option letter + text in "cursor_pill". If cut off or illegible, set cursor_pill to "Unclear crop — retry".',
+    'Return ONLY raw JSON: {"verification":"concise step-by-step check","detected_type":"MCQ","cursor_pill":"B. Exact option text","copy_value":"","expanded_note":"1-sentence summary"}',
+  ].join("\n");
 }
 
 async function querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout) {
@@ -345,24 +347,40 @@ async function querySingleGeminiModel(key, model, sysInstruction, promptText, im
     });
   }
 
-  const res = await httpsJsonRequest(
+  const generationConfig = {
+    responseMimeType: "application/json",
+    temperature: 0.0,
+    maxOutputTokens: 1200,
+  };
+
+  // Bound thinking budget on 3.8/3.5 Flash so it verifies accurately without timing out
+  if (!model.includes("lite")) {
+    generationConfig.thinkingConfig = { thinkingBudget: 1024 };
+  }
+
+  let res = await httpsJsonRequest(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
     {},
-    {
-      contents: [{ parts }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0.0,
-        maxOutputTokens: 600,
-      },
-    },
+    { contents: [{ parts }], generationConfig },
     reqTimeout
   );
+
+  // Clean fallback if a specific endpoint/key rejects thinkingConfig
+  if (res.status === 400 && generationConfig.thinkingConfig) {
+    delete generationConfig.thinkingConfig;
+    res = await httpsJsonRequest(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+      {},
+      { contents: [{ parts }], generationConfig },
+      reqTimeout
+    );
+  }
 
   if (res.status === 200) {
     const parsed = JSON.parse(res.text);
     const txt =
       parsed?.candidates?.[0]?.content?.parts
+        ?.filter((part) => !part.thought)
         ?.map((part) => part.text || "")
         .join("\n") || "";
     const cleanObj = parseModelJsonResponse(txt);
@@ -405,7 +423,7 @@ async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruct
     model,
     messages,
     temperature: 0.0,
-    max_tokens: 650,
+    max_tokens: 1400,
   };
 
   if (isGroq && model.includes("gpt-oss")) {
@@ -453,7 +471,7 @@ async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruct
   throw new Error(`${model}:${res.status}`);
 }
 
-// Parallel BYOK racing: fires top models concurrently so slow/stalled endpoints never block the user
+// Accuracy-first BYOK: prioritizes gemini-3.8-flash / gpt-oss-120b with 24s timeout
 async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   const keys = sanitizeApiKeys(keysRaw);
 
@@ -468,21 +486,18 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   }
 
   const sysInstruction = buildByokInstruction(actionMode);
-  const reqTimeout = imgB64 ? 18000 : 14000;
-  const racers = [];
+  const reqTimeout = 24000;
   const failReasons = [];
 
   for (const key of keys) {
     if (key.startsWith("AIza") || key.startsWith("AQ.")) {
-      const models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"];
-      const ordered =
-        lastGoodByok && lastGoodByok.key === key
-          ? [lastGoodByok.model, ...models.filter((m) => m !== lastGoodByok.model)]
-          : models;
-
-      for (const model of ordered.slice(0, 2)) {
-        if (!isByokCoolingDown(key, model)) {
-          racers.push(querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout));
+      const models = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
+      for (const model of models) {
+        if (isByokCoolingDown(key, model)) continue;
+        try {
+          return await querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout);
+        } catch (err) {
+          failReasons.push(err.message || "err");
         }
       }
     } else if (key.startsWith("gsk_") || key.startsWith("nvapi-") || key.startsWith("sk-")) {
@@ -501,31 +516,23 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
       const modelList = isGroq
         ? imgB64
           ? ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
-          : ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+          : ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
         : isNvidia
           ? ["nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3.5-lightning-30b-a3b"]
           : isOr
-            ? ["openrouter/free", "google/gemma-4-31b-it:free"]
+            ? ["google/gemma-4-31b-it:free", "openrouter/free"]
             : ["gpt-4o-mini"];
 
-      for (const model of modelList.slice(0, 2)) {
-        if (!isByokCoolingDown(key, model)) {
-          racers.push(
-            querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruction, promptText, imgB64, reqTimeout)
-          );
+      for (const model of modelList) {
+        if (isByokCoolingDown(key, model)) continue;
+        try {
+          return await querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruction, promptText, imgB64, reqTimeout);
+        } catch (err) {
+          failReasons.push(err.message || "err");
         }
       }
     } else {
       failReasons.push(`BadPrefix(${key.slice(0, 4)})`);
-    }
-  }
-
-  if (racers.length > 0) {
-    try {
-      return await Promise.any(racers);
-    } catch (aggErr) {
-      const errs = aggErr && aggErr.errors ? aggErr.errors.map((e) => e.message) : [];
-      failReasons.push(...errs);
     }
   }
 
@@ -1453,7 +1460,7 @@ ipcMain.on("hud-save-key", async (_event, key) => {
   const t0 = Date.now();
   const check = await executeDirectByok(
     cleanKey,
-    'Return ONLY JSON: {"detected_type":"DIRECT_VALUE","cursor_pill":"Key verified ✓","copy_value":"","expanded_note":""}',
+    'Return ONLY JSON: {"verification":"ok","detected_type":"DIRECT_VALUE","cursor_pill":"Key verified ✓","copy_value":"","expanded_note":""}',
     null,
     "solve"
   );

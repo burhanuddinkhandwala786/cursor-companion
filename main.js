@@ -227,7 +227,7 @@ function syncEscapeShortcut() {
 }
 
 // Force IPv4 (family: 4) to prevent ASUS TUF / Windows IPv6 DNS stalls
-function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 15000) {
+function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 11000) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(bodyObj);
     const url = new URL(urlStr);
@@ -349,13 +349,12 @@ async function querySingleGeminiModel(key, model, sysInstruction, promptText, im
 
   const generationConfig = {
     responseMimeType: "application/json",
-    temperature: 0.0,
-    maxOutputTokens: 1200,
+    maxOutputTokens: 900,
   };
 
-  // Bound thinking budget on 3.8/3.5 Flash so it verifies accurately without timing out
+  // Gemini 3.5 / 3.8 use thinkingLevel ("LOW" = fast ~1.5s reasoning without 35s HIGH stall)
   if (!model.includes("lite")) {
-    generationConfig.thinkingConfig = { thinkingBudget: 1024 };
+    generationConfig.thinkingConfig = { thinkingLevel: "LOW" };
   }
 
   let res = await httpsJsonRequest(
@@ -365,7 +364,7 @@ async function querySingleGeminiModel(key, model, sysInstruction, promptText, im
     reqTimeout
   );
 
-  // Clean fallback if a specific endpoint/key rejects thinkingConfig
+  // Clean fallback if an endpoint/key rejects thinkingConfig
   if (res.status === 400 && generationConfig.thinkingConfig) {
     delete generationConfig.thinkingConfig;
     res = await httpsJsonRequest(
@@ -423,7 +422,7 @@ async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruct
     model,
     messages,
     temperature: 0.0,
-    max_tokens: 1400,
+    max_tokens: 1200,
   };
 
   if (isGroq && model.includes("gpt-oss")) {
@@ -471,7 +470,7 @@ async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruct
   throw new Error(`${model}:${res.status}`);
 }
 
-// Accuracy-first BYOK: prioritizes gemini-3.8-flash / gpt-oss-120b with 24s timeout
+// Fast + accurate BYOK: gemini-3.5-flash (thinkingLevel LOW) first with tight 8.5s/11s timeouts
 async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   const keys = sanitizeApiKeys(keysRaw);
 
@@ -486,12 +485,12 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   }
 
   const sysInstruction = buildByokInstruction(actionMode);
-  const reqTimeout = 24000;
+  const reqTimeout = imgB64 ? 11000 : 8500;
   const failReasons = [];
 
   for (const key of keys) {
     if (key.startsWith("AIza") || key.startsWith("AQ.")) {
-      const models = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
+      const models = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"];
       for (const model of models) {
         if (isByokCoolingDown(key, model)) continue;
         try {
@@ -547,7 +546,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
 
 async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
   const url = new URL(endpoint, BACKEND_URL);
-  const reqTimeout = payload.image_base64 ? 26000 : 18000;
+  const reqTimeout = payload.image_base64 ? 18000 : 14000;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -951,7 +950,7 @@ async function captureDisplayNative(display) {
   return { image: match.thumbnail, sf };
 }
 
-// Wider high-DPI safe capture (920x640 default; auto-escalates to 1280x860 if cropped)
+// Fast, sharp high-DPI safe capture (920x640 @ q80; auto-escalates to 1280x860 if cropped)
 async function captureAroundCursor(boxW = 920, boxH = 640) {
   const pt = screen.getCursorScreenPoint();
   const disp = screen.getDisplayNearestPoint(pt);
@@ -979,7 +978,7 @@ async function captureAroundCursor(boxW = 920, boxH = 640) {
 
   return image
     .crop({ x: left, y: top, width: cropW, height: cropH })
-    .toJPEG(86)
+    .toJPEG(80)
     .toString("base64");
 }
 
@@ -1361,7 +1360,7 @@ ipcMain.on("snip-complete", async (_event, rect) => {
 
     const b64 = image
       .crop({ x, y, width: w, height: h })
-      .toJPEG(86)
+      .toJPEG(80)
       .toString("base64");
 
     const res = await runAnalysisPipeline({

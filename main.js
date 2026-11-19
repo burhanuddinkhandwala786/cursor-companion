@@ -51,7 +51,7 @@ let settings = {
 };
 
 const LOCAL_CACHE = new Map();
-const LOCAL_CACHE_TTL = 30 * 60 * 1000;
+const LOCAL_CACHE_TTL = 45 * 60 * 1000;
 const BYOK_COOLDOWN = new Map();
 
 function isByokCoolingDown(key, model) {
@@ -76,6 +76,17 @@ function setByokCooldown(key, model, ms) {
       BYOK_COOLDOWN.delete(BYOK_COOLDOWN.keys().next().value);
     }
   }
+}
+
+function sanitizeApiKeys(raw) {
+  const cleaned = String(raw || "").replace(
+    /\b(?:bearer|api_key|key)\s*[:=]?\s*/gi,
+    ""
+  );
+  return cleaned
+    .split(/[\s,;]+/)
+    .map((k) => k.trim().replace(/^["']|["']$/g, ""))
+    .filter((k) => k.length > 10);
 }
 
 function normalizeLocalKey(text, mode) {
@@ -110,7 +121,7 @@ function setLocalCache(key, data) {
     ts: Date.now(),
     data: { ...data },
   });
-  if (LOCAL_CACHE.size > 200) {
+  if (LOCAL_CACHE.size > 250) {
     LOCAL_CACHE.delete(LOCAL_CACHE.keys().next().value);
   }
 }
@@ -215,6 +226,7 @@ function syncEscapeShortcut() {
   }
 }
 
+// Force IPv4 (family: 4) to prevent ASUS TUF / Windows IPv6 DNS stalls
 function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(bodyObj);
@@ -226,6 +238,7 @@ function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 15000) {
         port: url.port || undefined,
         path: url.pathname + url.search,
         method: "POST",
+        family: 4,
         timeout: timeoutMs,
         agent: false,
         headers: {
@@ -310,7 +323,7 @@ function parseModelJsonResponse(rawText) {
 
 function buildByokInstruction(actionMode) {
   const baseVerification =
-    'Accuracy is #1. Solve step-by-step internally before outputting JSON. Watch for NOT/EXCEPT/INCORRECT and unit conversions. Read ALL options (A/B/C/D/E) before choosing; if two options hold and a combined option exists ("both A and B", "both B and C", "all of the above"), you MUST pick the combined option. Do not trust pre-selected radio buttons. If unclear/cut off, return cursor_pill "Unclear crop — retry".';
+    'Accuracy is #1. Solve step-by-step internally before outputting JSON. Watch for NOT/EXCEPT/INCORRECT and unit conversions. Read ALL options (A/B/C/D/E) before choosing; if two options hold and a combined option exists ("both A and B", "both B and C", "all of the above"), you MUST pick the combined option. Do not trust pre-selected radio buttons. Only if question stem or options are physically cut off/illegible, return cursor_pill "Unclear crop — retry".';
 
   if (actionMode === "rewrite") {
     return 'Rewrite cleanly and politely while keeping exact meaning. Return ONLY raw JSON: {"detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}';
@@ -321,237 +334,204 @@ function buildByokInstruction(actionMode) {
   return `${baseVerification} Return ONLY raw JSON: {"detected_type":"MCQ","cursor_pill":"B. Exact option text","copy_value":"","expanded_note":"1-sentence verification"}`;
 }
 
+async function querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout) {
+  const parts = [{ text: `${sysInstruction}\n\n${promptText}` }];
+  if (imgB64) {
+    parts.push({
+      inline_data: {
+        mime_type: "image/jpeg",
+        data: imgB64,
+      },
+    });
+  }
+
+  const res = await httpsJsonRequest(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+    {},
+    {
+      contents: [{ parts }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.0,
+        maxOutputTokens: 600,
+      },
+    },
+    reqTimeout
+  );
+
+  if (res.status === 200) {
+    const parsed = JSON.parse(res.text);
+    const txt =
+      parsed?.candidates?.[0]?.content?.parts
+        ?.map((part) => part.text || "")
+        .join("\n") || "";
+    const cleanObj = parseModelJsonResponse(txt);
+    if (cleanObj) {
+      lastGoodByok = { key, model };
+      cleanObj.key_source = "BYOK";
+      return cleanObj;
+    }
+    throw new Error(`${model}:nonJSON`);
+  }
+
+  if (res.status === 429) {
+    setByokCooldown(key, model, 20000);
+  } else if (res.status === 404 || res.status === 400) {
+    setByokCooldown(key, model, 3600000);
+  }
+  throw new Error(`${model}:${res.status}`);
+}
+
+async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruction, promptText, imgB64, reqTimeout) {
+  const messages = imgB64
+    ? [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: `${sysInstruction}\n\n${promptText}` },
+            {
+              type: "image_url",
+              image_url: { url: `data:image/jpeg;base64,${imgB64}` },
+            },
+          ],
+        },
+      ]
+    : [
+        { role: "system", content: sysInstruction },
+        { role: "user", content: promptText },
+      ];
+
+  const body = {
+    model,
+    messages,
+    temperature: 0.0,
+    max_tokens: 650,
+  };
+
+  if (isGroq && model.includes("gpt-oss")) {
+    body.reasoning_effort = "medium";
+  }
+  if (isGroq && !imgB64) {
+    body.response_format = { type: "json_object" };
+  }
+
+  let res = await httpsJsonRequest(
+    endpoint,
+    { Authorization: `Bearer ${key}` },
+    body,
+    reqTimeout
+  );
+
+  if (res.status === 400 && (body.response_format || body.reasoning_effort)) {
+    delete body.response_format;
+    delete body.reasoning_effort;
+    res = await httpsJsonRequest(
+      endpoint,
+      { Authorization: `Bearer ${key}` },
+      body,
+      reqTimeout
+    );
+  }
+
+  if (res.status === 200) {
+    const parsed = JSON.parse(res.text);
+    const msg = parsed?.choices?.[0]?.message || {};
+    const cleanObj = parseModelJsonResponse(msg.content || "");
+    if (cleanObj) {
+      lastGoodByok = { key, model };
+      cleanObj.key_source = "BYOK";
+      return cleanObj;
+    }
+    throw new Error(`${model}:nonJSON`);
+  }
+
+  if (res.status === 429) {
+    setByokCooldown(key, model, 20000);
+  } else if (res.status === 400 || res.status === 404) {
+    setByokCooldown(key, model, 3600000);
+  }
+  throw new Error(`${model}:${res.status}`);
+}
+
+// Parallel BYOK racing: fires top models concurrently so slow/stalled endpoints never block the user
 async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
-  const keys = String(keysRaw || "")
-    .split(/[\s,;]+/)
-    .map((key) => key.trim().replace(/^["']|["']$/g, ""))
-    .filter((key) => key.length > 10);
+  const keys = sanitizeApiKeys(keysRaw);
 
   if (!keys.length) {
     return {
       detected_type: "ERROR",
       cursor_pill: "Invalid key format in Alt+K",
       copy_value: "",
-      expanded_note: "Paste a valid API key starting with AIza, gsk_, nvapi-, sk-or-, or sk-",
+      expanded_note: "Paste a valid API key starting with AIza, AQ., gsk_, nvapi-, sk-or-, or sk-",
       key_source: "BYOK",
     };
   }
 
   const sysInstruction = buildByokInstruction(actionMode);
-  const maxTokens = actionMode === "explain" ? 750 : 520;
   const reqTimeout = imgB64 ? 18000 : 14000;
+  const racers = [];
   const failReasons = [];
 
   for (const key of keys) {
-    try {
-      if (key.startsWith("AIza")) {
-        // Try both current 3.x and 2.5 slugs so EVERY valid AIza key works without breaking on 404/400 model mismatch
-        const defaultModels = [
-          "gemini-3.5-flash-lite",
-          "gemini-3.8-flash",
-          "gemini-3.5-flash",
-        ];
+    if (key.startsWith("AIza") || key.startsWith("AQ.")) {
+      const models = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"];
+      const ordered =
+        lastGoodByok && lastGoodByok.key === key
+          ? [lastGoodByok.model, ...models.filter((m) => m !== lastGoodByok.model)]
+          : models;
 
-        const geminiModels =
-          lastGoodByok && lastGoodByok.key === key
-            ? [
-                lastGoodByok.model,
-                ...defaultModels.filter((model) => model !== lastGoodByok.model),
-              ]
-            : defaultModels;
-
-        for (const model of geminiModels) {
-          if (isByokCoolingDown(key, model)) continue;
-
-          try {
-            const parts = [{ text: `${sysInstruction}\n\n${promptText}` }];
-            if (imgB64) {
-              parts.push({
-                inline_data: {
-                  mime_type: "image/jpeg",
-                  data: imgB64,
-                },
-              });
-            }
-
-            const res = await httpsJsonRequest(
-              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
-              {},
-              {
-                contents: [{ parts }],
-                generationConfig: {
-                  responseMimeType: "application/json",
-                  temperature: 0.0,
-                  maxOutputTokens: maxTokens,
-                },
-              },
-              reqTimeout
-            );
-
-            if (res.status === 200) {
-              const parsed = JSON.parse(res.text);
-              const txt =
-                parsed?.candidates?.[0]?.content?.parts
-                  ?.map((part) => part.text || "")
-                  .join("\n") || "";
-
-              const cleanObj = parseModelJsonResponse(txt);
-              if (cleanObj) {
-                lastGoodByok = { key, model };
-                cleanObj.key_source = "BYOK";
-                return cleanObj;
-              }
-              failReasons.push(`${model}:nonJSON`);
-            } else if (res.status === 429) {
-              setByokCooldown(key, model, 20000);
-              failReasons.push(`${model}:429`);
-            } else if (res.status === 404) {
-              // Model slug unavailable on this key -> continue to next model (do NOT break!)
-              setByokCooldown(key, model, 3600000);
-              failReasons.push(`${model}:404`);
-            } else if (res.status === 400 || res.status === 403) {
-              const errLower = String(res.text || "").toLowerCase();
-              if (errLower.includes("api_key_invalid") || errLower.includes("api key not valid") || res.status === 403) {
-                failReasons.push("Invalid Gemini API key");
-                break; // Only break if the key itself is rejected
-              }
-              setByokCooldown(key, model, 3600000);
-              failReasons.push(`${model}:400`);
-            } else {
-              failReasons.push(`${model}:${res.status}`);
-            }
-          } catch (err) {
-            failReasons.push(`${model}:${err.message || "err"}`);
-          }
+      for (const model of ordered.slice(0, 2)) {
+        if (!isByokCoolingDown(key, model)) {
+          racers.push(querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout));
         }
-      } else if (
-        key.startsWith("gsk_") ||
-        key.startsWith("nvapi-") ||
-        key.startsWith("sk-")
-      ) {
-        const isGroq = key.startsWith("gsk_");
-        const isNvidia = key.startsWith("nvapi-");
-        const isOr = key.startsWith("sk-or-");
-
-        const endpoint = isGroq
-          ? "https://api.groq.com/openai/v1/chat/completions"
-          : isNvidia
-            ? "https://integrate.api.nvidia.com/v1/chat/completions"
-            : isOr
-              ? "https://openrouter.ai/api/v1/chat/completions"
-              : "https://api.openai.com/v1/chat/completions";
-
-        const modelList = isGroq
-          ? imgB64
-            ? ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
-            : ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
-          : isNvidia
-            ? ["nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3.5-lightning-30b-a3b"]
-            : isOr
-              ? ["openrouter/free", "google/gemma-4-31b-it:free"]
-              : ["gpt-4o-mini"];
-
-        const orderedModels =
-          lastGoodByok && lastGoodByok.key === key
-            ? [
-                lastGoodByok.model,
-                ...modelList.filter((m) => m !== lastGoodByok.model),
-              ]
-            : modelList;
-
-        for (const model of orderedModels) {
-          if (isByokCoolingDown(key, model)) continue;
-
-          const messages = imgB64
-            ? [
-                {
-                  role: "user",
-                  content: [
-                    { type: "text", text: `${sysInstruction}\n\n${promptText}` },
-                    {
-                      type: "image_url",
-                      image_url: { url: `data:image/jpeg;base64,${imgB64}` },
-                    },
-                  ],
-                },
-              ]
-            : [
-                { role: "system", content: sysInstruction },
-                { role: "user", content: promptText },
-              ];
-
-          const body = {
-            model,
-            messages,
-            temperature: 0.0,
-            max_tokens: maxTokens,
-          };
-
-          if (isGroq && model.includes("gpt-oss")) {
-            body.reasoning_effort = "medium";
-          }
-          if (isGroq && !imgB64) {
-            body.response_format = { type: "json_object" };
-          }
-
-          try {
-            let res = await httpsJsonRequest(
-              endpoint,
-              { Authorization: `Bearer ${key}` },
-              body,
-              reqTimeout
-            );
-
-            // Retry without strict json_object / reasoning_effort if endpoint returns 400
-            if (res.status === 400 && (body.response_format || body.reasoning_effort)) {
-              delete body.response_format;
-              delete body.reasoning_effort;
-              res = await httpsJsonRequest(
-                endpoint,
-                { Authorization: `Bearer ${key}` },
-                body,
-                reqTimeout
-              );
-            }
-
-            if (res.status === 200) {
-              const parsed = JSON.parse(res.text);
-              const msg = parsed?.choices?.[0]?.message || {};
-              const txt = msg.content || "";
-              const cleanObj = parseModelJsonResponse(txt);
-              if (cleanObj) {
-                lastGoodByok = { key, model };
-                cleanObj.key_source = "BYOK";
-                return cleanObj;
-              }
-              failReasons.push(`${model}:nonJSON`);
-            } else if (res.status === 401 || res.status === 403) {
-              failReasons.push(`Invalid ${isGroq ? "Groq" : isNvidia ? "NVIDIA" : isOr ? "OpenRouter" : "OpenAI"} key`);
-              break;
-            } else if (res.status === 429) {
-              setByokCooldown(key, model, 20000);
-              failReasons.push(`${model}:429`);
-            } else {
-              setByokCooldown(key, model, 3600000);
-              failReasons.push(`${model}:${res.status}`);
-            }
-          } catch (err) {
-            failReasons.push(`${model}:${err.message || "err"}`);
-          }
-        }
-      } else {
-        failReasons.push(`BadPrefix(${key.slice(0, 4)})`);
       }
-    } catch (err) {
-      failReasons.push(err.message || "NetErr");
+    } else if (key.startsWith("gsk_") || key.startsWith("nvapi-") || key.startsWith("sk-")) {
+      const isGroq = key.startsWith("gsk_");
+      const isNvidia = key.startsWith("nvapi-");
+      const isOr = key.startsWith("sk-or-");
+
+      const endpoint = isGroq
+        ? "https://api.groq.com/openai/v1/chat/completions"
+        : isNvidia
+          ? "https://integrate.api.nvidia.com/v1/chat/completions"
+          : isOr
+            ? "https://openrouter.ai/api/v1/chat/completions"
+            : "https://api.openai.com/v1/chat/completions";
+
+      const modelList = isGroq
+        ? imgB64
+          ? ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
+          : ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+        : isNvidia
+          ? ["nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3.5-lightning-30b-a3b"]
+          : isOr
+            ? ["openrouter/free", "google/gemma-4-31b-it:free"]
+            : ["gpt-4o-mini"];
+
+      for (const model of modelList.slice(0, 2)) {
+        if (!isByokCoolingDown(key, model)) {
+          racers.push(
+            querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruction, promptText, imgB64, reqTimeout)
+          );
+        }
+      }
+    } else {
+      failReasons.push(`BadPrefix(${key.slice(0, 4)})`);
+    }
+  }
+
+  if (racers.length > 0) {
+    try {
+      return await Promise.any(racers);
+    } catch (aggErr) {
+      const errs = aggErr && aggErr.errors ? aggErr.errors.map((e) => e.message) : [];
+      failReasons.push(...errs);
     }
   }
 
   return {
     detected_type: "ERROR",
-    cursor_pill: failReasons[0] && failReasons[0].startsWith("Invalid ")
-      ? `${failReasons[0]} (Alt+K)`
-      : `Personal key issue (${failReasons.slice(0, 2).join(", ")})`,
+    cursor_pill: `Personal key issue (${failReasons.slice(0, 2).join(", ") || "retry"})`,
     copy_value: "",
     expanded_note: failReasons.join(" | "),
     key_source: "BYOK",
@@ -598,7 +578,7 @@ function warmBackend() {
   try {
     const req = https.get(
       BACKEND_URL + "/healthz",
-      { agent: false, timeout: 10000 },
+      { agent: false, family: 4, timeout: 10000 },
       (res) => {
         res.on("error", () => {});
         res.resume();
@@ -964,7 +944,8 @@ async function captureDisplayNative(display) {
   return { image: match.thumbnail, sf };
 }
 
-async function captureAroundCursor(boxW = 680, boxH = 420) {
+// Wider high-DPI safe capture (920x640 default; auto-escalates to 1280x860 if cropped)
+async function captureAroundCursor(boxW = 920, boxH = 640) {
   const pt = screen.getCursorScreenPoint();
   const disp = screen.getDisplayNearestPoint(pt);
   const { image, sf } = await captureDisplayNative(disp);
@@ -982,7 +963,7 @@ async function captureAroundCursor(boxW = 680, boxH = 420) {
 
   const left = Math.max(
     0,
-    Math.min(Math.round(relX * sf - cropW * 0.42), sz.width - cropW)
+    Math.min(Math.round(relX * sf - cropW * 0.45), sz.width - cropW)
   );
   const top = Math.max(
     0,
@@ -991,7 +972,7 @@ async function captureAroundCursor(boxW = 680, boxH = 420) {
 
   return image
     .crop({ x: left, y: top, width: cropW, height: cropH })
-    .toJPEG(78)
+    .toJPEG(86)
     .toString("base64");
 }
 
@@ -1133,7 +1114,7 @@ async function runAnalysisPipeline({
     return byokResult;
   }
 
-  const poolResult = await postJsonWithJitterRetry("/v3/analyze", {
+  const poolResult = await postJsonWithJitterRetry("/v3_1/analyze", {
     text_content: textContent || null,
     image_base64: imageBase64 || null,
     follow_up: followUp || null,
@@ -1161,11 +1142,21 @@ async function handleInstantScan() {
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
-    const b64 = await captureAroundCursor(680, 420);
-    const res = await runAnalysisPipeline({
+    const b64 = await captureAroundCursor(920, 640);
+    let res = await runAnalysisPipeline({
       imageBase64: b64,
       actionMode: "solve",
     });
+
+    // Auto-escalate to wide 1280x860 capture if high-DPI screen cut off options
+    if (res && /unclear crop/i.test(String(res.cursor_pill || ""))) {
+      const wideB64 = await captureAroundCursor(1280, 860);
+      res = await runAnalysisPipeline({
+        imageBase64: wideB64,
+        actionMode: "solve",
+      });
+    }
+
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, "[Cursor Question Scan]");
   } catch (_) {
@@ -1192,12 +1183,19 @@ async function handleTextAction(actionMode = "solve") {
         actionMode,
       });
     } else {
-      const b64 = await captureAroundCursor(640, 340);
+      const b64 = await captureAroundCursor(920, 640);
       sourceLabel = `[Highlighted ${actionMode} Scan]`;
       res = await runAnalysisPipeline({
         imageBase64: b64,
         actionMode,
       });
+      if (res && /unclear crop/i.test(String(res.cursor_pill || ""))) {
+        const wideB64 = await captureAroundCursor(1280, 860);
+        res = await runAnalysisPipeline({
+          imageBase64: wideB64,
+          actionMode,
+        });
+      }
     }
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
@@ -1343,7 +1341,7 @@ ipcMain.on("snip-complete", async (_event, rect) => {
 
     const { image, sf } = await captureDisplayNative(disp);
     const sz = image.getSize();
-    const pad = Math.round(28 * sf);
+    const pad = Math.round(36 * sf);
 
     const x = Math.max(0, Math.round(rect.x * sf - pad));
     const y = Math.max(0, Math.round(rect.y * sf - pad));
@@ -1356,7 +1354,7 @@ ipcMain.on("snip-complete", async (_event, rect) => {
 
     const b64 = image
       .crop({ x, y, width: w, height: h })
-      .toJPEG(80)
+      .toJPEG(86)
       .toString("base64");
 
     const res = await runAnalysisPipeline({
@@ -1419,7 +1417,8 @@ async function processSpotlightQuery(_event, query) {
 ipcMain.on("hud-spotlight-query", processSpotlightQuery);
 ipcMain.on("hud-followup", processSpotlightQuery);
 
-ipcMain.on("hud-save-key", (_event, key) => {
+// Instant live validation when user saves personal API key in Alt+K
+ipcMain.on("hud-save-key", async (_event, key) => {
   if (typeof key !== "string") return;
 
   if (spotlightWin && !spotlightWin.isDestroyed()) {
@@ -1431,22 +1430,57 @@ ipcMain.on("hud-save-key", (_event, key) => {
   BYOK_COOLDOWN.clear();
   LOCAL_CACHE.clear();
 
-  const cleanKey = key.trim();
+  const cleanKey = sanitizeApiKeys(key).join(", ");
   settings.userApiKey = cleanKey;
   saveSettings({ userApiKey: cleanKey });
-
-  showHud(
-    {
-      mode: "result",
-      detected_type: "DIRECT_VALUE",
-      cursor_pill: cleanKey ? "Personal key active" : "Cloud pool active",
-      key_source: cleanKey ? "BYOK" : "POOL",
-      elapsed: "✓",
-    },
-    2200
-  );
-
   syncSidecar();
+
+  if (!cleanKey) {
+    showHud(
+      {
+        mode: "result",
+        detected_type: "DIRECT_VALUE",
+        cursor_pill: "Cloud pool active",
+        key_source: "POOL",
+        elapsed: "✓",
+      },
+      2200
+    );
+    return;
+  }
+
+  showHud({ mode: "loading", cursor_pill: "•••" });
+  const t0 = Date.now();
+  const check = await executeDirectByok(
+    cleanKey,
+    'Return ONLY JSON: {"detected_type":"DIRECT_VALUE","cursor_pill":"Key verified ✓","copy_value":"","expanded_note":""}',
+    null,
+    "solve"
+  );
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+
+  if (check && check.detected_type !== "ERROR") {
+    showHud(
+      {
+        mode: "result",
+        detected_type: "DIRECT_VALUE",
+        cursor_pill: "Personal key verified ✓",
+        key_source: "BYOK",
+        elapsed,
+      },
+      2600
+    );
+  } else {
+    showHud(
+      {
+        mode: "error",
+        cursor_pill: (check && check.cursor_pill) || "Invalid key (Alt+K)",
+        key_source: "BYOK",
+        elapsed,
+      },
+      3600
+    );
+  }
 });
 
 ipcMain.on("hud-copy", (_event, text) => {
@@ -1483,10 +1517,10 @@ function createTray() {
   const icon = nativeImage.createEmpty();
 
   tray = new Tray(icon);
-  tray.setToolTip("Cursor Companion V3");
+  tray.setToolTip("Cursor Companion V3.1");
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: "Cursor Companion V3", enabled: false },
+      { label: "Cursor Companion V3.1", enabled: false },
       { type: "separator" },
       { label: "Cursor Scan (Alt + A)", click: () => handleInstantScan() },
       { label: "Region Snip (Alt + Q)", click: () => handleRegionSnip() },

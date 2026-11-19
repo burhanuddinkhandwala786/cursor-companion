@@ -1,0 +1,43 @@
+{
+  "name": "cursor-companion",
+  "productName": "Cursor Companion",
+  "version": "3.0.0",
+  "description": "AI Study and Productivity Cursor Overlay",
+  "main": "main.js",
+  "author": {
+    "name": "Burhanuddin Khandwala",
+    "email": "burhanuddinkhandwala786@gmail.com"
+  },
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.burhanuddin.cursorcompanion",
+    "productName": "Cursor Companion",
+    "copyright": "Copyright © 2026 Burhanuddin Khandwala",
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "publisherName": "Burhanuddin Khandwala"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}

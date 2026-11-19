@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cursor Companion</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: "Segoe UI Variable", "Segoe UI", "Inter", system-ui, -apple-system, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent !important;
+      user-select: none;
+    }
+
+    /* ============================================================
+       1. PRECISION 24PX CURSOR PILL (PIXEL-ALIGNED, ZERO BLEED)
+       ============================================================ */
+    #hud {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      height: 24px;
+      padding: 0 9px;
+      border: 1px solid rgba(255, 255, 255, 0.11);
+      border-radius: 7px;
+      background: #101218;
+      overflow: hidden;
+    }
+
+    #hud[data-mode="loading"] {
+      padding: 0 8px;
+      justify-content: center;
+    }
+
+    .top-strip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      height: 100%;
+      min-width: 0;
+    }
+
+    #statusDot {
+      width: 5px;
+      height: 5px;
+      flex: 0 0 5px;
+      border-radius: 50%;
+      background: #10b981;
+    }
+
+    #hud[data-mode="loading"] #statusDot {
+      background: #38bdf8;
+      animation: pulseDot 0.85s ease-in-out infinite;
+    }
+
+    #hud[data-mode="error"] #statusDot {
+      background: #f43f5e;
+    }
+
+    @keyframes pulseDot {
+      0%, 100% { opacity: 0.3; }
+      50% { opacity: 1; }
+    }
+
+    #answerViewport {
+      display: flex;
+      align-items: center;
+      flex: 1;
+      height: 100%;
+      min-width: 0;
+      overflow: hidden;
+    }
+
+    #minimalAnswer {
+      display: inline-block;
+      width: max-content;
+      white-space: nowrap;
+      color: #f8fafc;
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1;
+      letter-spacing: 0.1px;
+    }
+
+    #hud[data-mode="loading"] #minimalAnswer {
+      color: #94a3b8;
+      letter-spacing: 1.5px;
+    }
+
+    #hud[data-mode="error"] #minimalAnswer {
+      color: #fda4af;
+    }
+
+    #metaBadge {
+      flex: 0 0 auto;
+      font-size: 9.5px;
+      font-weight: 500;
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+      color: rgba(148, 163, 184, 0.72);
+    }
+
+    /* ============================================================
+       2. 100% STEALTH SNIP LAYER
+       ============================================================ */
+    #snip-layer {
+      display: none;
+      position: fixed;
+      inset: 0;
+      cursor: crosshair;
+      background: transparent;
+    }
+
+    #snip-box {
+      position: absolute;
+      display: none;
+      border: 1px dashed rgba(56, 189, 248, 0.65);
+      border-radius: 3px;
+      background: transparent;
+    }
+
+    /* ============================================================
+       3. SPOTLIGHT COMMAND BAR (ALT + G / ALT + F / ALT + K)
+       ============================================================ */
+    #spotlight-bar {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      height: 44px;
+      padding: 0 12px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 10px;
+      background: #101218;
+    }
+
+    #spotlightTag {
+      flex: 0 0 auto;
+      padding: 3px 7px;
+      border-radius: 5px;
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+    }
+
+    #spotlightInput {
+      flex: 1;
+      height: 28px;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: #f8fafc;
+      font-size: 12px;
+    }
+
+    #spotlightInput::placeholder {
+      color: rgba(148, 163, 184, 0.55);
+    }
+
+    #spotlightHint {
+      flex: 0 0 auto;
+      font-size: 10px;
+      color: rgba(148, 163, 184, 0.55);
+    }
+
+    /* ============================================================
+       4. SLIDE-OUT STUDY SIDECAR (ALT + D)
+       ============================================================ */
+    #sidecar-panel {
+      display: none;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+      padding: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      background: #101218;
+      color: #f1f5f9;
+    }
+
+    .sidecar-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #f8fafc;
+    }
+
+    .sidecar-badge {
+      font-size: 10px;
+      font-weight: 500;
+      color: #38bdf8;
+    }
+
+    .sidecar-keys {
+      margin-top: 8px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 9.5px;
+      color: #94a3b8;
+      line-height: 1.5;
+    }
+
+    #sidecarList {
+      flex: 1;
+      margin-top: 8px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      user-select: text;
+    }
+
+    #sidecarList::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    #sidecarList::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.16);
+      border-radius: 4px;
+    }
+
+    .sc-card {
+      padding: 9px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      background: #161922;
+    }
+
+    .sc-card.active {
+      border-color: rgba(56, 189, 248, 0.45);
+      background: #18202c;
+    }
+
+    .sc-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 8px;
+    }
+
+    .sc-pill {
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #f8fafc;
+      line-height: 1.35;
+    }
+
+    .sc-meta {
+      font-size: 9.5px;
+      color: #94a3b8;
+      white-space: nowrap;
+    }
+
+    .sc-note {
+      margin-top: 5px;
+      font-size: 10.5px;
+      line-height: 1.45;
+      color: #cbd5e1;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud" data-mode="result">
+    <div class="top-strip">
+      <span id="statusDot"></span>
+      <div id="answerViewport">
+        <span id="minimalAnswer"></span>
+      </div>
+      <span id="metaBadge"></span>
+    </div>
+  </div>
+
+  <div id="snip-layer">
+    <div id="snip-box"></div>
+  </div>
+
+  <div id="spotlight-bar">
+    <span id="spotlightTag">ASK</span>
+    <input
+      id="spotlightInput"
+      type="text"
+      autocomplete="off"
+      spellcheck="false"
+      placeholder="Ask anything or follow up..."
+    />
+    <span id="spotlightHint">Enter</span>
+  </div>
+
+  <div id="sidecar-panel">
+    <div class="sidecar-header">
+      <span>Study Notes & History</span>
+      <span class="sidecar-badge">Alt+D</span>
+    </div>
+    <div class="sidecar-keys">
+      Alt+A Scan · Alt+Q Snip · Alt+C Solve · Alt+W Rewrite · Alt+E Explain · Alt+Enter Paste
+    </div>
+    <div id="sidecarList"></div>
+  </div>
+
+  <script>
+    const hash = window.location.hash;
+    const hudElement = document.getElementById("hud");
+    const snipLayer = document.getElementById("snip-layer");
+    const spotlightBar = document.getElementById("spotlight-bar");
+    const sidecarPanel = document.getElementById("sidecar-panel");
+
+    function escapeHtml(str) {
+      const map = { 38: "amp", 60: "lt", 62: "gt", 34: "quot" };
+      return String(str || "").replace(/[&<>"]/g, (ch) => "&" + map[ch.charCodeAt(0)] + ";");
+    }
+
+    if (hash === "#snip") {
+      hudElement.style.display = "none";
+      snipLayer.style.display = "block";
+
+      let startX = 0;
+      let startY = 0;
+      let isDragging = false;
+      let displayId = null;
+      const selectionBox = document.getElementById("snip-box");
+
+      window.companion.onSnipInit((data) => {
+        displayId = data && data.displayId ? data.displayId : null;
+      });
+
+      snipLayer.addEventListener("mousedown", (event) => {
+        isDragging = true;
+        startX = event.clientX;
+        startY = event.clientY;
+        selectionBox.style.display = "block";
+        selectionBox.style.left = startX + "px";
+        selectionBox.style.top = startY + "px";
+        selectionBox.style.width = "0px";
+        selectionBox.style.height = "0px";
+      });
+
+      window.addEventListener("mousemove", (event) => {
+        if (!isDragging) return;
+        selectionBox.style.left = Math.min(startX, event.clientX) + "px";
+        selectionBox.style.top = Math.min(startY, event.clientY) + "px";
+        selectionBox.style.width = Math.abs(event.clientX - startX) + "px";
+        selectionBox.style.height = Math.abs(event.clientY - startY) + "px";
+      });
+
+      window.addEventListener("mouseup", (event) => {
+        if (!isDragging) return;
+        isDragging = false;
+        window.companion.completeSnip({
+          x: Math.min(startX, event.clientX),
+          y: Math.min(startY, event.clientY),
+          w: Math.abs(event.clientX - startX),
+          h: Math.abs(event.clientY - startY),
+          displayId,
+        });
+      });
+
+      window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") window.companion.cancelSnip();
+      });
+    } else if (hash === "#spotlight") {
+      hudElement.style.display = "none";
+      spotlightBar.style.display = "flex";
+
+      const tagEl = document.getElementById("spotlightTag");
+      const inputEl = document.getElementById("spotlightInput");
+      let mode = "ask";
+
+      window.companion.onState((state) => {
+        const s = state || {};
+        mode = s.spotlightMode || "ask";
+
+        if (mode === "key") {
+          tagEl.textContent = "KEY";
+          inputEl.type = "text";
+          inputEl.placeholder = "Paste key(s): AIza..., gsk_..., nvapi-..., sk-or-...";
+          inputEl.value = s.userApiKey || "";
+        } else if (mode === "followup" && s.hasContext) {
+          tagEl.textContent = "FOLLOW-UP";
+          inputEl.type = "text";
+          inputEl.placeholder = "Ask follow-up on last scan...";
+          inputEl.value = "";
+        } else {
+          tagEl.textContent = "ASK";
+          inputEl.type = "text";
+          inputEl.placeholder = "Ask anything or follow up on last scan...";
+          inputEl.value = "";
+        }
+        setTimeout(() => inputEl.focus(), 20);
+      });
+
+      inputEl.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          window.companion.closeSpotlight();
+          return;
+        }
+        if (event.key !== "Enter" || event.isComposing) return;
+        const val = inputEl.value.trim();
+        if (mode === "key") {
+          window.companion.saveApiKey(val);
+        } else if (val) {
+          window.companion.sendSpotlightQuery(val);
+        }
+      });
+    } else if (hash === "#sidecar") {
+      hudElement.style.display = "none";
+      sidecarPanel.style.display = "flex";
+
+      const listEl = document.getElementById("sidecarList");
+
+      window.companion.onState((state) => {
+        const s = state || {};
+        const items = s.history || [];
+        const activeIdx = s.activeIdx || 0;
+
+        if (!items.length) {
+          listEl.innerHTML =
+            '<div class="sc-card"><div class="sc-note">No scans yet. Press Alt+A, Alt+Q, or Alt+C to start.</div></div>';
+          return;
+        }
+
+        listEl.innerHTML = items
+          .map((item, idx) => {
+            const activeCls = idx === activeIdx ? "active" : "";
+            const badge =
+              item.key_source === "BYOK" ? "🔑 " :
+              item.key_source === "BYOK_CACHE" ? "🔑⚡ " :
+              item.key_source === "CACHE" ? "⚡ " :
+              item.key_source === "TEST" ? "🧪 " :
+              (item.key_source === "POOL" || item.key_source === "POOL_CACHE") ? "☁ " : "";
+            const noteHtml = item.expanded_note
+              ? `<div class="sc-note">${escapeHtml(item.expanded_note)}</div>`
+              : "";
+            return `
+              <div class="sc-card ${activeCls}">
+                <div class="sc-top">
+                  <span class="sc-pill">${escapeHtml(item.cursor_pill || "")}</span>
+                  <span class="sc-meta">${badge}${escapeHtml(item.elapsed || "")}</span>
+                </div>
+                ${noteHtml}
+              </div>
+            `;
+          })
+          .join("");
+      });
+    } else {
+      const viewport = document.getElementById("answerViewport");
+      const answer = document.getElementById("minimalAnswer");
+      const metaBadge = document.getElementById("metaBadge");
+      let textAnimation = null;
+
+      function stopTextAnimation() {
+        if (textAnimation) {
+          textAnimation.cancel();
+          textAnimation = null;
+        }
+        answer.style.transform = "translateX(0)";
+      }
+
+      function fitAnswer() {
+        stopTextAnimation();
+        const overflow = answer.scrollWidth - viewport.clientWidth;
+        if (overflow <= 1 || hudElement.dataset.mode === "loading") return;
+
+        const travelMs = Math.max(2000, (overflow / 32) * 1000);
+        const pauseMs = 1600;
+        const totalMs = travelMs * 2 + pauseMs * 2;
+
+        textAnimation = answer.animate(
+          [
+            { transform: "translateX(0)", offset: 0 },
+            { transform: "translateX(0)", offset: pauseMs / totalMs },
+            { transform: `translateX(-${overflow}px)`, offset: (pauseMs + travelMs) / totalMs },
+            { transform: `translateX(-${overflow}px)`, offset: (pauseMs * 2 + travelMs) / totalMs },
+            { transform: "translateX(0)", offset: 1 },
+          ],
+          { duration: totalMs, iterations: Infinity, easing: "linear" }
+        );
+      }
+
+      window.companion.onState((state) => {
+        const s = state || {};
+        hudElement.dataset.mode =
+          s.mode === "loading"
+            ? "loading"
+            : s.mode === "error"
+              ? "error"
+              : "result";
+
+        answer.textContent = s.mode === "loading" ? "•••" : (s.cursor_pill || "");
+
+        const keyTag =
+          s.key_source === "BYOK" ? "🔑 " :
+          s.key_source === "BYOK_CACHE" ? "🔑⚡ " :
+          s.key_source === "CACHE" ? "⚡ " :
+          s.key_source === "TEST" ? "🧪 " :
+          (s.key_source === "POOL" || s.key_source === "POOL_CACHE") ? "☁ " : "";
+        metaBadge.textContent =
+          s.mode === "loading" ? "" : `${keyTag}${s.elapsed || ""}`.trim();
+
+        requestAnimationFrame(fitAnswer);
+      });
+
+      window.addEventListener("resize", fitAnswer);
+    }
+  </script>
+</body>
+</html>

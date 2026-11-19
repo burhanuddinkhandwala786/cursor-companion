@@ -1,0 +1,53 @@
+name: Build Windows Release (V3.1)
+
+on:
+  push:
+    branches:
+      - "v3.1-beta"
+    paths:
+      - "main.js"
+      - "preload.js"
+      - "index.html"
+      - "package.json"
+      - ".github/workflows/build-v3-win.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Verify JS syntax
+        run: |
+          node --check main.js
+          node --check preload.js
+
+      - name: Package Windows executable
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run build
+
+      - name: Publish to v3.1.0-beta Pre-Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v3.1.0-beta
+          name: Cursor Companion V3.1.0 Beta
+          prerelease: true
+          make_latest: "false"
+          files: |
+            dist/*.exe
+            dist/*.zip

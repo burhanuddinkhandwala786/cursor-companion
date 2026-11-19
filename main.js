@@ -22,13 +22,17 @@ const BACKEND_URL = "https://study-buddy-brain.onrender.com";
 let SETTINGS_PATH = "";
 
 let hudWin = null;
-let snipWin = null;
 let spotlightWin = null;
 let sidecarWin = null;
 let tray = null;
 
 let isPinned = false;
 let isBusy = false;
+let activeRequestId = 0;
+let busyWatchdog = null;
+let snipCorner1 = null;
+let snipCornerTimer = null;
+
 let escRegistered = false;
 let hideTimer = null;
 let followTimer = null;
@@ -163,44 +167,52 @@ function saveSettings(next) {
   }
 }
 
+// Native C++ WDA_EXCLUDEFROMCAPTURE via Electron — zero powershell.exe spawns during exams
 function enforceCaptureInvisibility(win) {
   if (!win || win.isDestroyed()) return;
   try {
     win.setContentProtection(true);
   } catch (_) {}
+}
 
-  if (process.platform === "win32") {
-    const applyAffinity = () => {
-      if (!win || win.isDestroyed()) return;
-      try {
-        const hwndBuf = win.getNativeWindowHandle();
-        const hwnd =
-          hwndBuf.length >= 8
-            ? Number(hwndBuf.readBigUInt64LE(0))
-            : hwndBuf.readUInt32LE(0);
-        const ps = `Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);' -Name W32 -Namespace N; [N.W32]::SetWindowDisplayAffinity([IntPtr]${hwnd}, 0x00000011) | Out-Null`;
-        execFile(
-          "powershell.exe",
-          ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-          { windowsHide: true },
-          () => {}
-        );
-      } catch (_) {}
-    };
-    applyAffinity();
-    setTimeout(applyAffinity, 45);
+function beginRequest() {
+  activeRequestId += 1;
+  const reqId = activeRequestId;
+  isBusy = true;
+  clearTimeout(busyWatchdog);
+  // Hard 24s safety watchdog: guarantees the app can NEVER freeze in isBusy state
+  busyWatchdog = setTimeout(() => {
+    if (activeRequestId === reqId && isBusy) {
+      isBusy = false;
+      showHud({ mode: "error", cursor_pill: "Timed out — press F8/Alt+A" }, 2600);
+    }
+  }, 24000);
+  return reqId;
+}
+
+function finishRequest(reqId) {
+  if (activeRequestId === reqId) {
+    clearTimeout(busyWatchdog);
+    busyWatchdog = null;
+    isBusy = false;
   }
+}
+
+function clearSnipCorner() {
+  snipCorner1 = null;
+  clearTimeout(snipCornerTimer);
+  snipCornerTimer = null;
 }
 
 function dismissAllOverlays() {
   isPinned = false;
+  activeRequestId += 1;
+  isBusy = false;
+  clearTimeout(busyWatchdog);
+  busyWatchdog = null;
+  clearSnipCorner();
   clearTimeout(hideTimer);
   stopCursorFollow();
-
-  if (snipWin && !snipWin.isDestroyed()) {
-    snipWin.close();
-    snipWin = null;
-  }
 
   for (const win of [spotlightWin, sidecarWin, hudWin]) {
     if (win && !win.isDestroyed()) win.hide();
@@ -210,9 +222,11 @@ function dismissAllOverlays() {
 }
 
 function syncEscapeShortcut() {
-  const anyOpen = [hudWin, snipWin, spotlightWin, sidecarWin].some(
-    (win) => win && !win.isDestroyed() && win.isVisible()
-  );
+  const anyOpen =
+    Boolean(snipCorner1) ||
+    [hudWin, spotlightWin, sidecarWin].some(
+      (win) => win && !win.isDestroyed() && win.isVisible()
+    );
 
   if (anyOpen && !escRegistered) {
     try {
@@ -352,7 +366,6 @@ async function querySingleGeminiModel(key, model, sysInstruction, promptText, im
     maxOutputTokens: 900,
   };
 
-  // Gemini 3.5 / 3.8 use thinkingLevel ("LOW" = fast ~1.5s reasoning without 35s HIGH stall)
   if (!model.includes("lite")) {
     generationConfig.thinkingConfig = { thinkingLevel: "LOW" };
   }
@@ -364,7 +377,6 @@ async function querySingleGeminiModel(key, model, sysInstruction, promptText, im
     reqTimeout
   );
 
-  // Clean fallback if an endpoint/key rejects thinkingConfig
   if (res.status === 400 && generationConfig.thinkingConfig) {
     delete generationConfig.thinkingConfig;
     res = await httpsJsonRequest(
@@ -391,8 +403,8 @@ async function querySingleGeminiModel(key, model, sysInstruction, promptText, im
     throw new Error(`${model}:nonJSON`);
   }
 
-  if (res.status === 429) {
-    setByokCooldown(key, model, 20000);
+  if (res.status === 429 || res.status === 503 || res.status === 504) {
+    setByokCooldown(key, model, 45000);
   } else if (res.status === 404 || res.status === 400) {
     setByokCooldown(key, model, 3600000);
   }
@@ -462,15 +474,14 @@ async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruct
     throw new Error(`${model}:nonJSON`);
   }
 
-  if (res.status === 429) {
-    setByokCooldown(key, model, 20000);
+  if (res.status === 429 || res.status === 503 || res.status === 504) {
+    setByokCooldown(key, model, 30000);
   } else if (res.status === 400 || res.status === 404) {
     setByokCooldown(key, model, 3600000);
   }
   throw new Error(`${model}:${res.status}`);
 }
 
-// Fast + accurate BYOK: gemini-3.5-flash (thinkingLevel LOW) first with tight 8.5s/11s timeouts
 async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   const keys = sanitizeApiKeys(keysRaw);
 
@@ -485,7 +496,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   }
 
   const sysInstruction = buildByokInstruction(actionMode);
-  const reqTimeout = imgB64 ? 11000 : 8500;
+  const reqTimeout = imgB64 ? 11000 : 9000;
   const failReasons = [];
 
   for (const key of keys) {
@@ -496,6 +507,9 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
         try {
           return await querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout);
         } catch (err) {
+          if (String(err.message || "").includes("Timeout")) {
+            setByokCooldown(key, model, 45000);
+          }
           failReasons.push(err.message || "err");
         }
       }
@@ -546,7 +560,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
 
 async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
   const url = new URL(endpoint, BACKEND_URL);
-  const reqTimeout = payload.image_base64 ? 18000 : 14000;
+  const reqTimeout = payload.image_base64 ? 19000 : 16000;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -559,7 +573,7 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
 
       if (res.status >= 500 && attempt < retries) {
         await new Promise((resolve) =>
-          setTimeout(resolve, 250 + Math.floor(Math.random() * 400))
+          setTimeout(resolve, 250 + Math.floor(Math.random() * 350))
         );
         continue;
       }
@@ -572,7 +586,7 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
     } catch (error) {
       if (attempt >= retries) throw error;
       await new Promise((resolve) =>
-        setTimeout(resolve, 250 + Math.floor(Math.random() * 400))
+        setTimeout(resolve, 250 + Math.floor(Math.random() * 350))
       );
     }
   }
@@ -622,6 +636,7 @@ function createHudWindow() {
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setIgnoreMouseEvents(true, { forward: true });
+  enforceCaptureInvisibility(win);
 
   win.webContents.on("did-finish-load", () => {
     if (!win.isDestroyed() && pendingHudState) {
@@ -702,7 +717,7 @@ function showHud(payload, autoHideMs = 0) {
 
   lockedW = isLoading
     ? 54
-    : Math.max(126, Math.min(340, Math.round(textLen * 7.5 + badgeReserve)));
+    : Math.max(126, Math.min(360, Math.round(textLen * 7.5 + badgeReserve)));
   lockedH = 24;
 
   hudWin.setFocusable(false);
@@ -725,6 +740,9 @@ function showHud(payload, autoHideMs = 0) {
     hudWin.showInactive();
   }
   enforceCaptureInvisibility(hudWin);
+  try {
+    hudWin.moveTop();
+  } catch (_) {}
 
   snapToCursor(true);
   syncEscapeShortcut();
@@ -818,6 +836,7 @@ function openSpotlight(initialMode = "ask") {
 
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  enforceCaptureInvisibility(win);
 
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;
@@ -862,6 +881,9 @@ function toggleSidecar() {
     sidecarWin.setBounds({ x, y, width, height });
     sidecarWin.showInactive();
     enforceCaptureInvisibility(sidecarWin);
+    try {
+      sidecarWin.moveTop();
+    } catch (_) {}
     syncEscapeShortcut();
     syncSidecar();
     return;
@@ -894,11 +916,15 @@ function toggleSidecar() {
 
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  enforceCaptureInvisibility(win);
 
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;
     win.showInactive();
     enforceCaptureInvisibility(win);
+    try {
+      win.moveTop();
+    } catch (_) {}
     syncEscapeShortcut();
     syncSidecar();
   });
@@ -950,15 +976,19 @@ async function captureDisplayNative(display) {
   return { image: match.thumbnail, sf };
 }
 
-// Fast, sharp high-DPI safe capture (920x640 @ q80; auto-escalates to 1280x860 if cropped)
-async function captureAroundCursor(boxW = 920, boxH = 640) {
+// Wide high-DPI safe capture (1120x760 default; full screen fallback if cropped)
+async function captureAroundCursor(boxW = 1120, boxH = 760, fullScreen = false) {
   const pt = screen.getCursorScreenPoint();
   const disp = screen.getDisplayNearestPoint(pt);
   const { image, sf } = await captureDisplayNative(disp);
+  const sz = image.getSize();
+
+  if (fullScreen) {
+    return image.toJPEG(80).toString("base64");
+  }
 
   const relX = pt.x - disp.bounds.x;
   const relY = pt.y - disp.bounds.y;
-  const sz = image.getSize();
 
   const cropW = Math.min(Math.round(boxW * sf), sz.width);
   const cropH = Math.min(Math.round(boxH * sf), sz.height);
@@ -978,7 +1008,42 @@ async function captureAroundCursor(boxW = 920, boxH = 640) {
 
   return image
     .crop({ x: left, y: top, width: cropW, height: cropH })
-    .toJPEG(80)
+    .toJPEG(82)
+    .toString("base64");
+}
+
+// Zero-Focus 2-Corner Crop: silently captures exact rectangle between Corner 1 and Corner 2 without opening any window
+async function captureBetweenPoints(p1, p2) {
+  const disp = screen.getDisplayNearestPoint(p1);
+  const { image, sf } = await captureDisplayNative(disp);
+  const sz = image.getSize();
+
+  const relX1 = p1.x - disp.bounds.x;
+  const relY1 = p1.y - disp.bounds.y;
+  const relX2 = p2.x - disp.bounds.x;
+  const relY2 = p2.y - disp.bounds.y;
+
+  const rawW = Math.abs(relX2 - relX1);
+  const rawH = Math.abs(relY2 - relY1);
+
+  // Accidental double-tap (<20px): gracefully widen to a smart 1120x760 box around cursor
+  if (rawW < 20 || rawH < 20) {
+    return captureAroundCursor(1120, 760, false);
+  }
+
+  const pad = Math.round(28 * sf);
+  const x = Math.max(0, Math.round(Math.min(relX1, relX2) * sf - pad));
+  const y = Math.max(0, Math.round(Math.min(relY1, relY2) * sf - pad));
+  const w = Math.min(sz.width - x, Math.round(rawW * sf + pad * 2));
+  const h = Math.min(sz.height - y, Math.round(rawH * sf + pad * 2));
+
+  if (w < 10 || h < 10) {
+    return captureAroundCursor(1120, 760, false);
+  }
+
+  return image
+    .crop({ x, y, width: w, height: h })
+    .toJPEG(84)
     .toString("base64");
 }
 
@@ -998,27 +1063,24 @@ Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void 
 [U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
 [U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
 [U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 35;
+Start-Sleep -Milliseconds 30;
 [U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
 [U.K]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 25;
+Start-Sleep -Milliseconds 20;
 [U.K]::keybd_event(0x43, 0, 2, [UIntPtr]::Zero);
 [U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
 `;
 
-    const triggerCopy = () => {
-      execFile(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-        { windowsHide: true },
-        () => {}
-      );
-    };
-
-    triggerCopy();
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
+      { windowsHide: true },
+      () => {}
+    );
 
     let checks = 0;
 
+    // Fast-fail in ~200ms on locked portals so visual scan takes over seamlessly
     const poll = setInterval(() => {
       checks++;
       const current = clipboard.readText();
@@ -1027,14 +1089,12 @@ Start-Sleep -Milliseconds 25;
         clearInterval(poll);
         clipboard.writeText(prev);
         resolve(current.trim());
-      } else if (checks === 9) {
-        triggerCopy();
-      } else if (checks >= 22) {
+      } else if (checks >= 10) {
         clearInterval(poll);
         clipboard.writeText(prev);
         resolve("");
       }
-    }, 25);
+    }, 20);
   });
 }
 
@@ -1143,43 +1203,106 @@ async function runAnalysisPipeline({
 
 async function handleInstantScan() {
   if (isBusy) return;
-  isBusy = true;
+  clearSnipCorner();
+  const reqId = beginRequest();
   const t0 = Date.now();
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
-    const b64 = await captureAroundCursor(920, 640);
+    const b64 = await captureAroundCursor(1120, 760, false);
+    if (activeRequestId !== reqId) return;
+
     let res = await runAnalysisPipeline({
       imageBase64: b64,
       actionMode: "solve",
     });
+    if (activeRequestId !== reqId) return;
 
-    // Auto-escalate to wide 1280x860 capture if high-DPI screen cut off options
+    // Auto-escalate to full display capture if question/options were still cut off
     if (res && /unclear crop/i.test(String(res.cursor_pill || ""))) {
-      const wideB64 = await captureAroundCursor(1280, 860);
+      const fullB64 = await captureAroundCursor(1280, 860, true);
+      if (activeRequestId !== reqId) return;
       res = await runAnalysisPipeline({
-        imageBase64: wideB64,
+        imageBase64: fullB64,
         actionMode: "solve",
       });
     }
 
+    if (activeRequestId !== reqId) return;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
-    handleResult(res, elapsed, "[Cursor Question Scan]");
+    handleResult(res, elapsed, "[Smart Screen Scan]");
   } catch (_) {
-    showHud({ mode: "error", cursor_pill: "Retry Alt+A" }, 2400);
+    if (activeRequestId === reqId) {
+      showHud({ mode: "error", cursor_pill: "Retry F8 / Alt+A" }, 2400);
+    }
   } finally {
-    isBusy = false;
+    finishRequest(reqId);
+  }
+}
+
+// Zero-Focus 2-Corner Snip (Alt+Q or F9): zero overlay window, zero clicks, zero proctor warnings
+async function handleTwoCornerSnip() {
+  if (isBusy) return;
+
+  const pt = screen.getCursorScreenPoint();
+
+  if (!snipCorner1) {
+    snipCorner1 = { x: pt.x, y: pt.y, ts: Date.now() };
+    clearTimeout(snipCornerTimer);
+    snipCornerTimer = setTimeout(() => {
+      clearSnipCorner();
+      syncEscapeShortcut();
+    }, 15000);
+    showHud(
+      {
+        mode: "result",
+        detected_type: "DIRECT_VALUE",
+        cursor_pill: "⌜ Corner 1 set → press F9/Alt+Q at bottom-right",
+        elapsed: "1/2",
+      },
+      6000
+    );
+    return;
+  }
+
+  const p1 = snipCorner1;
+  clearSnipCorner();
+  const reqId = beginRequest();
+  const t0 = Date.now();
+
+  try {
+    showHud({ mode: "loading", cursor_pill: "•••" });
+    const b64 = await captureBetweenPoints(p1, pt);
+    if (activeRequestId !== reqId) return;
+
+    const res = await runAnalysisPipeline({
+      imageBase64: b64,
+      actionMode: "solve",
+    });
+    if (activeRequestId !== reqId) return;
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+    handleResult(res, elapsed, "[2-Corner Snip]");
+  } catch (_) {
+    if (activeRequestId === reqId) {
+      showHud({ mode: "error", cursor_pill: "Retry F9 / Alt+Q" }, 2400);
+    }
+  } finally {
+    finishRequest(reqId);
   }
 }
 
 async function handleTextAction(actionMode = "solve") {
   if (isBusy) return;
-  isBusy = true;
+  clearSnipCorner();
+  const reqId = beginRequest();
   const t0 = Date.now();
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
     const selected = await grabSelectedTextDirectly();
+    if (activeRequestId !== reqId) return;
+
     let res;
     let sourceLabel = selected;
 
@@ -1189,84 +1312,37 @@ async function handleTextAction(actionMode = "solve") {
         actionMode,
       });
     } else {
-      const b64 = await captureAroundCursor(920, 640);
+      const b64 = await captureAroundCursor(1120, 760, false);
+      if (activeRequestId !== reqId) return;
       sourceLabel = `[Highlighted ${actionMode} Scan]`;
       res = await runAnalysisPipeline({
         imageBase64: b64,
         actionMode,
       });
-      if (res && /unclear crop/i.test(String(res.cursor_pill || ""))) {
-        const wideB64 = await captureAroundCursor(1280, 860);
+      if (
+        activeRequestId === reqId &&
+        res &&
+        /unclear crop/i.test(String(res.cursor_pill || ""))
+      ) {
+        const fullB64 = await captureAroundCursor(1280, 860, true);
+        if (activeRequestId !== reqId) return;
         res = await runAnalysisPipeline({
-          imageBase64: wideB64,
+          imageBase64: fullB64,
           actionMode,
         });
       }
     }
 
+    if (activeRequestId !== reqId) return;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, sourceLabel);
   } catch (_) {
-    showHud({ mode: "error", cursor_pill: "Retry hotkey" }, 2400);
+    if (activeRequestId === reqId) {
+      showHud({ mode: "error", cursor_pill: "Retry hotkey" }, 2400);
+    }
   } finally {
-    isBusy = false;
+    finishRequest(reqId);
   }
-}
-
-function handleRegionSnip() {
-  if (isBusy) return;
-
-  const pt = screen.getCursorScreenPoint();
-  const disp = screen.getDisplayNearestPoint(pt);
-
-  if (snipWin && !snipWin.isDestroyed()) {
-    snipWin.close();
-    snipWin = null;
-  }
-
-  const win = new BrowserWindow({
-    x: disp.bounds.x,
-    y: disp.bounds.y,
-    width: disp.bounds.width,
-    height: disp.bounds.height,
-    frame: false,
-    transparent: true,
-    backgroundColor: "#00000000",
-    thickFrame: false,
-    hasShadow: false,
-    focusable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    resizable: false,
-    show: false,
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-
-  snipWin = win;
-
-  win.setAlwaysOnTop(true, "screen-saver");
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-
-  win.webContents.once("did-finish-load", () => {
-    if (win.isDestroyed()) return;
-    win.showInactive();
-    enforceCaptureInvisibility(win);
-    syncEscapeShortcut();
-    win.webContents.send("snip-init", { displayId: disp.id });
-  });
-
-  win.on("closed", () => {
-    if (snipWin === win) snipWin = null;
-    syncEscapeShortcut();
-  });
-
-  win.loadFile(path.join(__dirname, "index.html"), {
-    hash: "snip",
-  });
 }
 
 function handleResult(res, elapsed, sourceContext) {
@@ -1315,76 +1391,6 @@ function handleResult(res, elapsed, sourceContext) {
   syncSidecar();
 }
 
-ipcMain.on("snip-complete", async (_event, rect) => {
-  if (snipWin && !snipWin.isDestroyed()) {
-    snipWin.close();
-    snipWin = null;
-  }
-
-  syncEscapeShortcut();
-
-  if (
-    isBusy ||
-    !rect ||
-    ![rect.x, rect.y, rect.w, rect.h].every(Number.isFinite) ||
-    rect.w < 10 ||
-    rect.h < 10
-  ) {
-    return;
-  }
-
-  isBusy = true;
-  const t0 = Date.now();
-
-  try {
-    showHud({ mode: "loading", cursor_pill: "•••" });
-
-    const disp =
-      screen
-        .getAllDisplays()
-        .find((display) => String(display.id) === String(rect.displayId)) ||
-      screen.getPrimaryDisplay();
-
-    const { image, sf } = await captureDisplayNative(disp);
-    const sz = image.getSize();
-    const pad = Math.round(36 * sf);
-
-    const x = Math.max(0, Math.round(rect.x * sf - pad));
-    const y = Math.max(0, Math.round(rect.y * sf - pad));
-    const w = Math.min(sz.width - x, Math.round(rect.w * sf + pad * 2));
-    const h = Math.min(sz.height - y, Math.round(rect.h * sf + pad * 2));
-
-    if (w < 1 || h < 1) {
-      throw new Error("Invalid snip dimensions");
-    }
-
-    const b64 = image
-      .crop({ x, y, width: w, height: h })
-      .toJPEG(80)
-      .toString("base64");
-
-    const res = await runAnalysisPipeline({
-      imageBase64: b64,
-      actionMode: "solve",
-    });
-
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
-    handleResult(res, elapsed, "[Snipped Region]");
-  } catch (_) {
-    showHud({ mode: "error", cursor_pill: "Retry Alt+Q" }, 2400);
-  } finally {
-    isBusy = false;
-  }
-});
-
-ipcMain.on("snip-cancel", () => {
-  if (snipWin && !snipWin.isDestroyed()) {
-    snipWin.close();
-    snipWin = null;
-  }
-  syncEscapeShortcut();
-});
-
 async function processSpotlightQuery(_event, query) {
   if (spotlightWin && !spotlightWin.isDestroyed()) {
     spotlightWin.hide();
@@ -1394,7 +1400,7 @@ async function processSpotlightQuery(_event, query) {
   if (typeof query !== "string" || !query.trim() || isBusy) return;
 
   query = query.trim();
-  isBusy = true;
+  const reqId = beginRequest();
   const t0 = Date.now();
 
   try {
@@ -1411,19 +1417,21 @@ async function processSpotlightQuery(_event, query) {
           actionMode: "solve",
         });
 
+    if (activeRequestId !== reqId) return;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, query);
   } catch (_) {
-    showHud({ mode: "error", cursor_pill: "Retry Alt+G" }, 2400);
+    if (activeRequestId === reqId) {
+      showHud({ mode: "error", cursor_pill: "Retry Alt+G" }, 2400);
+    }
   } finally {
-    isBusy = false;
+    finishRequest(reqId);
   }
 }
 
 ipcMain.on("hud-spotlight-query", processSpotlightQuery);
 ipcMain.on("hud-followup", processSpotlightQuery);
 
-// Instant live validation when user saves personal API key in Alt+K
 ipcMain.on("hud-save-key", async (_event, key) => {
   if (typeof key !== "string") return;
 
@@ -1526,10 +1534,10 @@ function createTray() {
   tray.setToolTip("Cursor Companion V3.1");
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: "Cursor Companion V3.1", enabled: false },
+      { label: "Cursor Companion V3.1 (Zero-Focus)", enabled: false },
       { type: "separator" },
-      { label: "Cursor Scan (Alt + A)", click: () => handleInstantScan() },
-      { label: "Region Snip (Alt + Q)", click: () => handleRegionSnip() },
+      { label: "Smart Scan (F8 / Alt + A)", click: () => handleInstantScan() },
+      { label: "2-Corner Snip (F9 / Alt + Q)", click: () => handleTwoCornerSnip() },
       { label: "Solve Selection (Alt + C)", click: () => handleTextAction("solve") },
       { label: "Rewrite Selection (Alt + W)", click: () => handleTextAction("rewrite") },
       { label: "Explain Selection (Alt + E)", click: () => handleTextAction("explain") },
@@ -1537,6 +1545,7 @@ function createTray() {
       { label: "Spotlight Bar (Alt + G)", click: () => openSpotlight("ask") },
       { label: "Study Sidecar (Alt + D)", click: () => toggleSidecar() },
       { label: "Personal Key (Alt + K)", click: () => openSpotlight("key") },
+      { label: "Cancel / Reset (F10 / Alt + X)", click: () => dismissAllOverlays() },
       { type: "separator" },
       { label: "Quit", click: () => app.quit() },
     ])
@@ -1571,8 +1580,14 @@ if (!gotSingleInstanceLock) {
 
       keepAliveTimer = setInterval(warmBackend, 240000);
 
+      // Zero-modifier proctor-safe aliases
+      registerShortcut("F8", handleInstantScan);
+      registerShortcut("F9", handleTwoCornerSnip);
+      registerShortcut("F10", dismissAllOverlays);
+
+      // Standard hotkeys
       registerShortcut("Alt+A", handleInstantScan);
-      registerShortcut("Alt+Q", handleRegionSnip);
+      registerShortcut("Alt+Q", handleTwoCornerSnip);
       registerShortcut("Alt+C", () => handleTextAction("solve"));
       registerShortcut("Alt+W", () => handleTextAction("rewrite"));
       registerShortcut("Alt+E", () => handleTextAction("explain"));
@@ -1611,6 +1626,8 @@ if (!gotSingleInstanceLock) {
 
 app.on("will-quit", () => {
   clearTimeout(hideTimer);
+  clearTimeout(busyWatchdog);
+  clearTimeout(snipCornerTimer);
   clearInterval(keepAliveTimer);
   stopCursorFollow();
   globalShortcut.unregisterAll();

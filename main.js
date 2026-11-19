@@ -347,11 +347,9 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
       if (key.startsWith("AIza")) {
         // Try both current 3.x and 2.5 slugs so EVERY valid AIza key works without breaking on 404/400 model mismatch
         const defaultModels = [
-          "gemini-2.5-flash",
-          "gemini-3.5-flash",
-          "gemini-3.8-flash",
-          "gemini-2.5-flash-lite",
           "gemini-3.5-flash-lite",
+          "gemini-3.8-flash",
+          "gemini-3.5-flash",
         ];
 
         const geminiModels =

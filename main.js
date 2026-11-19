@@ -52,7 +52,6 @@ let settings = {
 
 const LOCAL_CACHE = new Map();
 const LOCAL_CACHE_TTL = 30 * 60 * 1000;
-
 const BYOK_COOLDOWN = new Map();
 
 function isByokCoolingDown(key, model) {
@@ -153,7 +152,6 @@ function saveSettings(next) {
   }
 }
 
-// Re-assert Windows DWM WDA_EXCLUDEFROMCAPTURE (0x11) AFTER showing window so screen-shares omit overlays
 function enforceCaptureInvisibility(win) {
   if (!win || win.isDestroyed()) return;
   try {
@@ -217,7 +215,7 @@ function syncEscapeShortcut() {
   }
 }
 
-function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 12000) {
+function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(bodyObj);
     const url = new URL(urlStr);
@@ -262,7 +260,6 @@ function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 12000) {
   });
 }
 
-// Strict JSON-only parser: never falls back to raw thinking prose ("I need to think about it...")
 function parseModelJsonResponse(rawText) {
   const cleaned = String(rawText || "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -294,7 +291,6 @@ function parseModelJsonResponse(rawText) {
     };
   }
 
-  // Regex fallback if JSON was truncated right after cursor_pill
   const pillMatch = cleaned.match(/"cursor_pill"\s*:\s*"([^"]+)"/);
   if (pillMatch && pillMatch[1].trim()) {
     const pill = pillMatch[1].trim();
@@ -314,13 +310,13 @@ function parseModelJsonResponse(rawText) {
 
 function buildByokInstruction(actionMode) {
   const baseVerification =
-    'Verify carefully before answering: watch for NOT/EXCEPT/INCORRECT, check ALL options (A/B/C/D/E), and if two options are true and a combined option exists ("both A and B", "both B and C", "all of the above"), pick the combined option. If text or image is unclear or cut off, return cursor_pill "Unclear crop — retry". Never guess.';
+    'Accuracy is #1. Solve step-by-step internally before outputting JSON. Watch for NOT/EXCEPT/INCORRECT and unit conversions. Read ALL options (A/B/C/D/E) before choosing; if two options hold and a combined option exists ("both A and B", "both B and C", "all of the above"), you MUST pick the combined option. Do not trust pre-selected radio buttons. If unclear/cut off, return cursor_pill "Unclear crop — retry".';
 
   if (actionMode === "rewrite") {
-    return 'Rewrite cleanly and politely while preserving meaning. Return ONLY raw JSON: {"detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}';
+    return 'Rewrite cleanly and politely while keeping exact meaning. Return ONLY raw JSON: {"detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}';
   }
   if (actionMode === "explain") {
-    return 'Explain clearly and accurately in plain English without guessing. Return ONLY raw JSON: {"detected_type":"CONCEPT_EXPLAIN","cursor_pill":"1-line summary","copy_value":"1-line summary","expanded_note":"3 short bullets"}';
+    return 'Explain clearly in plain English without guessing. Return ONLY raw JSON: {"detected_type":"CONCEPT_EXPLAIN","cursor_pill":"1-line summary","copy_value":"1-line summary","expanded_note":"3 short bullets"}';
   }
   return `${baseVerification} Return ONLY raw JSON: {"detected_type":"MCQ","cursor_pill":"B. Exact option text","copy_value":"","expanded_note":"1-sentence verification"}`;
 }
@@ -341,23 +337,21 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
     };
   }
 
-  const sysInstruction =
-    actionMode === "rewrite"
-      ? 'Rewrite cleanly and politely. Return ONLY raw JSON: {"detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}'
-      : actionMode === "explain"
-        ? 'Explain clearly in plain English. Return ONLY raw JSON: {"detected_type":"CONCEPT_EXPLAIN","cursor_pill":"1-line summary","copy_value":"1-line summary","expanded_note":"3 short bullets"}'
-        : 'Solve step-by-step internally. Read ALL options (A/B/C/D/E) before answering. If two options are valid and a combined option exists ("both A and B", "both B and C", "all of the above"), you MUST pick the combined option. Return ONLY raw JSON: {"detected_type":"MCQ","cursor_pill":"D. Exact option text","copy_value":"","expanded_note":"1-sentence reason"}';
-
-  const reqTimeout = imgB64 ? 15000 : 12000;
+  const sysInstruction = buildByokInstruction(actionMode);
+  const maxTokens = actionMode === "explain" ? 750 : 520;
+  const reqTimeout = imgB64 ? 18000 : 14000;
   const failReasons = [];
 
   for (const key of keys) {
     try {
       if (key.startsWith("AIza")) {
+        // Try both current 3.x and 2.5 slugs so EVERY valid AIza key works without breaking on 404/400 model mismatch
         const defaultModels = [
-          "gemini-3.5-flash-lite",
-          "gemini-3.8-flash",
+          "gemini-2.5-flash",
           "gemini-3.5-flash",
+          "gemini-3.8-flash",
+          "gemini-2.5-flash-lite",
+          "gemini-3.5-flash-lite",
         ];
 
         const geminiModels =
@@ -390,7 +384,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
                 generationConfig: {
                   responseMimeType: "application/json",
                   temperature: 0.0,
-                  maxOutputTokens: 1000,
+                  maxOutputTokens: maxTokens,
                 },
               },
               reqTimeout
@@ -409,19 +403,27 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
                 cleanObj.key_source = "BYOK";
                 return cleanObj;
               }
-              failReasons.push("Gemini:nonJSON");
+              failReasons.push(`${model}:nonJSON`);
             } else if (res.status === 429) {
-              setByokCooldown(key, model, 25000);
-              failReasons.push("Gemini:429");
-            } else if (res.status === 400 || res.status === 403) {
+              setByokCooldown(key, model, 20000);
+              failReasons.push(`${model}:429`);
+            } else if (res.status === 404) {
+              // Model slug unavailable on this key -> continue to next model (do NOT break!)
               setByokCooldown(key, model, 3600000);
-              failReasons.push(`Gemini:${res.status}`);
-              break;
+              failReasons.push(`${model}:404`);
+            } else if (res.status === 400 || res.status === 403) {
+              const errLower = String(res.text || "").toLowerCase();
+              if (errLower.includes("api_key_invalid") || errLower.includes("api key not valid") || res.status === 403) {
+                failReasons.push("Invalid Gemini API key");
+                break; // Only break if the key itself is rejected
+              }
+              setByokCooldown(key, model, 3600000);
+              failReasons.push(`${model}:400`);
             } else {
-              failReasons.push(`Gemini:${res.status}`);
+              failReasons.push(`${model}:${res.status}`);
             }
           } catch (err) {
-            failReasons.push(`Gemini:${err.message || "err"}`);
+            failReasons.push(`${model}:${err.message || "err"}`);
           }
         }
       } else if (
@@ -441,71 +443,103 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
               ? "https://openrouter.ai/api/v1/chat/completions"
               : "https://api.openai.com/v1/chat/completions";
 
-        const model = isGroq
+        const modelList = isGroq
           ? imgB64
-            ? "qwen/qwen3.8-27b"
-            : "openai/gpt-oss-20b"
+            ? ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
+            : ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
           : isNvidia
-            ? "nvidia/nemotron-3.5-super-vl-120b-a12b"
+            ? ["nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3.5-lightning-30b-a3b"]
             : isOr
-              ? "openrouter/free"
-              : "gpt-4o-mini";
+              ? ["openrouter/free", "google/gemma-4-31b-it:free"]
+              : ["gpt-4o-mini"];
 
-        const messages = imgB64
-          ? [
-              {
-                role: "user",
-                content: [
-                  { type: "text", text: `${sysInstruction}\n\n${promptText}` },
-                  {
-                    type: "image_url",
-                    image_url: { url: `data:image/jpeg;base64,${imgB64}` },
-                  },
-                ],
-              },
-            ]
-          : [
-              { role: "system", content: sysInstruction },
-              { role: "user", content: promptText },
-            ];
+        const orderedModels =
+          lastGoodByok && lastGoodByok.key === key
+            ? [
+                lastGoodByok.model,
+                ...modelList.filter((m) => m !== lastGoodByok.model),
+              ]
+            : modelList;
 
-        const body = {
-          model,
-          messages,
-          temperature: 0.0,
-          max_tokens: 1000,
-        };
+        for (const model of orderedModels) {
+          if (isByokCoolingDown(key, model)) continue;
 
-        if (isGroq && model.includes("gpt-oss")) {
-          body.reasoning_effort = "low";
-        }
-        if (isGroq && !imgB64) {
-          body.response_format = { type: "json_object" };
-        }
+          const messages = imgB64
+            ? [
+                {
+                  role: "user",
+                  content: [
+                    { type: "text", text: `${sysInstruction}\n\n${promptText}` },
+                    {
+                      type: "image_url",
+                      image_url: { url: `data:image/jpeg;base64,${imgB64}` },
+                    },
+                  ],
+                },
+              ]
+            : [
+                { role: "system", content: sysInstruction },
+                { role: "user", content: promptText },
+              ];
 
-        const res = await httpsJsonRequest(
-          endpoint,
-          { Authorization: `Bearer ${key}` },
-          body,
-          reqTimeout
-        );
+          const body = {
+            model,
+            messages,
+            temperature: 0.0,
+            max_tokens: maxTokens,
+          };
 
-        if (res.status === 200) {
-          const parsed = JSON.parse(res.text);
-          const msg = parsed?.choices?.[0]?.message || {};
-          const txt = msg.content || "";
-          const cleanObj = parseModelJsonResponse(txt);
-          if (cleanObj) {
-            lastGoodByok = { key, model };
-            cleanObj.key_source = "BYOK";
-            return cleanObj;
+          if (isGroq && model.includes("gpt-oss")) {
+            body.reasoning_effort = "medium";
           }
-          failReasons.push(`${isGroq ? "Groq" : isNvidia ? "NVIDIA" : "Key"}:nonJSON`);
-        } else if (res.status === 429) {
-          setByokCooldown(key, model, 25000);
-          failReasons.push(`${isGroq ? "Groq" : isNvidia ? "NVIDIA" : "Key"}:429`);
-        } else {
-          failReasons.push(`${isGroq ? "Groq" : isNvidia ? "NVIDIA" : "Key"}:${res.status}`);
+          if (isGroq && !imgB64) {
+            body.response_format = { type: "json_object" };
+          }
+
+          try {
+            let res = await httpsJsonRequest(
+              endpoint,
+              { Authorization: `Bearer ${key}` },
+              body,
+              reqTimeout
+            );
+
+            // Retry without strict json_object / reasoning_effort if endpoint returns 400
+            if (res.status === 400 && (body.response_format || body.reasoning_effort)) {
+              delete body.response_format;
+              delete body.reasoning_effort;
+              res = await httpsJsonRequest(
+                endpoint,
+                { Authorization: `Bearer ${key}` },
+                body,
+                reqTimeout
+              );
+            }
+
+            if (res.status === 200) {
+              const parsed = JSON.parse(res.text);
+              const msg = parsed?.choices?.[0]?.message || {};
+              const txt = msg.content || "";
+              const cleanObj = parseModelJsonResponse(txt);
+              if (cleanObj) {
+                lastGoodByok = { key, model };
+                cleanObj.key_source = "BYOK";
+                return cleanObj;
+              }
+              failReasons.push(`${model}:nonJSON`);
+            } else if (res.status === 401 || res.status === 403) {
+              failReasons.push(`Invalid ${isGroq ? "Groq" : isNvidia ? "NVIDIA" : isOr ? "OpenRouter" : "OpenAI"} key`);
+              break;
+            } else if (res.status === 429) {
+              setByokCooldown(key, model, 20000);
+              failReasons.push(`${model}:429`);
+            } else {
+              setByokCooldown(key, model, 3600000);
+              failReasons.push(`${model}:${res.status}`);
+            }
+          } catch (err) {
+            failReasons.push(`${model}:${err.message || "err"}`);
+          }
         }
       } else {
         failReasons.push(`BadPrefix(${key.slice(0, 4)})`);
@@ -517,7 +551,9 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
 
   return {
     detected_type: "ERROR",
-    cursor_pill: `Personal key issue (${failReasons.slice(0, 2).join(", ")})`,
+    cursor_pill: failReasons[0] && failReasons[0].startsWith("Invalid ")
+      ? `${failReasons[0]} (Alt+K)`
+      : `Personal key issue (${failReasons.slice(0, 2).join(", ")})`,
     copy_value: "",
     expanded_note: failReasons.join(" | "),
     key_source: "BYOK",
@@ -526,7 +562,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
 
 async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
   const url = new URL(endpoint, BACKEND_URL);
-  const reqTimeout = payload.image_base64 ? 24000 : 16000;
+  const reqTimeout = payload.image_base64 ? 26000 : 18000;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -1086,7 +1122,6 @@ async function runAnalysisPipeline({
   const localHit = getLocalCache(localCacheKey, Boolean(userKey));
   if (localHit) return localHit;
 
-  // Strict BYOK isolation: when personal key is set in Alt+K, execute ONLY with personal key
   if (userKey) {
     const byokResult = await executeDirectByok(
       userKey,

@@ -2289,7 +2289,7 @@ if (!gotSingleInstanceLock) {
       createTray();
       syncRemoteConfig();
 
-      keepAliveTimer = setInterval(warmBackend, 240000);
+      //keepAliveTimer = setInterval(warmBackend, 240000);
     })
     .catch((error) => {
       console.error("Application startup failed:", error);

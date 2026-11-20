@@ -13,6 +13,7 @@ const {
 
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 const https = require("https");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
@@ -20,6 +21,7 @@ const { execFile } = require("child_process");
 const BACKEND_URL = "https://study-buddy-brain.onrender.com";
 
 let SETTINGS_PATH = "";
+let PACKS_PATH = "";
 
 let hudWin = null;
 let spotlightWin = null;
@@ -51,15 +53,36 @@ let lastWinY = -9999;
 let settings = {
   userApiKey: "",
   autoCopy: true,
+  localOcr: false, // Keep OFF for zero-process stealth on SHL/AMCAT; toggle ON in Tray for Turbo OCR + Cross-User Cache
+  activePack: "default",
   deviceId: crypto.randomUUID(),
+};
+
+let modePacks = {};
+
+const DEFAULT_MODE_PACKS = {
+  default: {
+    label: "Exam & Academic Solver (Default)",
+    prompt: "",
+  },
+  coding: {
+    label: "Coding & DSA Interview Pack",
+    prompt:
+      'You are an expert software engineer. Fill "verification" FIRST with time/space complexity and edge cases, then put the exact concise fix or output in "cursor_pill" and clean runnable code in "copy_value". Return ONLY raw JSON: {"verification":"edge cases checked","detected_type":"CODE_FIX","cursor_pill":"concise fix","copy_value":"exact code","expanded_note":"complexity note"}',
+  },
+  excel: {
+    label: "Excel & Finance Formula Pack",
+    prompt:
+      'You are an Excel and finance expert. Fill "verification" FIRST checking cell references and syntax, then put the exact Excel formula in both "cursor_pill" and "copy_value". Return ONLY raw JSON: {"verification":"formula verified","detected_type":"DIRECT_VALUE","cursor_pill":"=XLOOKUP(...)","copy_value":"=XLOOKUP(...)","expanded_note":"1-line usage note"}',
+  },
 };
 
 const LOCAL_CACHE = new Map();
 const LOCAL_CACHE_TTL = 45 * 60 * 1000;
 const BYOK_COOLDOWN = new Map();
 
-function isByokCoolingDown(key, model) {
-  const cacheKey = `${key}:${model}`;
+function isByokCoolingDown(key, model, modality = "txt") {
+  const cacheKey = `${key}:${model}:${modality}`;
   const until = BYOK_COOLDOWN.get(cacheKey);
   if (!until) return false;
   if (Date.now() >= until) {
@@ -69,8 +92,8 @@ function isByokCoolingDown(key, model) {
   return true;
 }
 
-function setByokCooldown(key, model, ms) {
-  BYOK_COOLDOWN.set(`${key}:${model}`, Date.now() + ms);
+function setByokCooldown(key, model, ms, modality = "txt") {
+  BYOK_COOLDOWN.set(`${key}:${model}:${modality}`, Date.now() + ms);
   if (BYOK_COOLDOWN.size > 500) {
     const now = Date.now();
     for (const [cacheKey, until] of BYOK_COOLDOWN) {
@@ -102,7 +125,7 @@ function normalizeLocalKey(text, mode) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "");
 
-  return normalized.length >= 25 ? `${mode}:${normalized}` : "";
+  return normalized.length >= 25 ? `${mode}:${settings.activePack}:${normalized}` : "";
 }
 
 function getLocalCache(key, hasPersonalKey = false) {
@@ -131,7 +154,31 @@ function setLocalCache(key, data) {
 }
 
 function initSettingsPath() {
-  SETTINGS_PATH = path.join(app.getPath("userData"), "v3-settings.json");
+  const userDir = app.getPath("userData");
+  SETTINGS_PATH = path.join(userDir, "v3-settings.json");
+  PACKS_PATH = path.join(userDir, "mode-packs.json");
+}
+
+function loadModePacks() {
+  modePacks = { ...DEFAULT_MODE_PACKS };
+  try {
+    if (PACKS_PATH && fs.existsSync(PACKS_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(PACKS_PATH, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        modePacks = { ...DEFAULT_MODE_PACKS, ...parsed };
+      }
+    } else if (PACKS_PATH) {
+      fs.mkdirSync(path.dirname(PACKS_PATH), { recursive: true });
+      fs.writeFileSync(PACKS_PATH, JSON.stringify(DEFAULT_MODE_PACKS, null, 2), "utf8");
+    }
+  } catch (_) {}
+}
+
+function getActiveCustomPrompt() {
+  const pack = modePacks[settings.activePack];
+  return pack && typeof pack.prompt === "string" && pack.prompt.trim()
+    ? pack.prompt.trim()
+    : "";
 }
 
 function loadSettings() {
@@ -149,6 +196,8 @@ function loadSettings() {
     ...saved,
     userApiKey: typeof saved.userApiKey === "string" ? saved.userApiKey : "",
     autoCopy: typeof saved.autoCopy === "boolean" ? saved.autoCopy : true,
+    localOcr: typeof saved.localOcr === "boolean" ? saved.localOcr : false,
+    activePack: typeof saved.activePack === "string" && saved.activePack ? saved.activePack : "default",
     deviceId:
       typeof saved.deviceId === "string" && saved.deviceId.trim()
         ? saved.deviceId
@@ -167,7 +216,7 @@ function saveSettings(next) {
   }
 }
 
-// Native C++ WDA_EXCLUDEFROMCAPTURE via Electron — zero powershell.exe spawns during exams
+// Native C++ WDA_EXCLUDEFROMCAPTURE via Electron — zero powershell.exe spawns
 function enforceCaptureInvisibility(win) {
   if (!win || win.isDestroyed()) return;
   try {
@@ -180,13 +229,13 @@ function beginRequest() {
   const reqId = activeRequestId;
   isBusy = true;
   clearTimeout(busyWatchdog);
-  // Hard 24s safety watchdog: guarantees the app can NEVER freeze in isBusy state
+  // 27s safety watchdog (> 23s network timeout) guarantees app never freezes
   busyWatchdog = setTimeout(() => {
     if (activeRequestId === reqId && isBusy) {
       isBusy = false;
       showHud({ mode: "error", cursor_pill: "Timed out — press F8/Alt+A" }, 2600);
     }
-  }, 24000);
+  }, 27000);
   return reqId;
 }
 
@@ -240,8 +289,8 @@ function syncEscapeShortcut() {
   }
 }
 
-// Force IPv4 (family: 4) to prevent ASUS TUF / Windows IPv6 DNS stalls
-function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 11000) {
+// Force IPv4 (family: 4) to prevent Windows IPv6 DNS stalls
+function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(bodyObj);
     const url = new URL(urlStr);
@@ -287,6 +336,7 @@ function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 11000) {
   });
 }
 
+// Brace-safe JSON parser: never breaks on coding questions or math sets containing {}
 function parseModelJsonResponse(rawText) {
   const cleaned = String(rawText || "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -295,16 +345,26 @@ function parseModelJsonResponse(rawText) {
     .trim();
 
   let bestObj = null;
-  const regex = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
-  let match;
 
-  while ((match = regex.exec(cleaned)) !== null) {
-    try {
-      const candidate = JSON.parse(match[0]);
-      if (candidate && candidate.cursor_pill) {
-        bestObj = candidate;
-      }
-    } catch (_) {}
+  try {
+    const direct = JSON.parse(cleaned);
+    const item = Array.isArray(direct) ? direct[0] : direct;
+    if (item && typeof item === "object" && item.cursor_pill) {
+      bestObj = item;
+    }
+  } catch (_) {}
+
+  if (!bestObj) {
+    const first = cleaned.indexOf("{");
+    const last = cleaned.lastIndexOf("}");
+    if (first !== -1 && last > first) {
+      try {
+        const sliced = JSON.parse(cleaned.slice(first, last + 1));
+        if (sliced && typeof sliced === "object" && sliced.cursor_pill) {
+          bestObj = sliced;
+        }
+      } catch (_) {}
+    }
   }
 
   if (bestObj && String(bestObj.cursor_pill).trim()) {
@@ -336,6 +396,10 @@ function parseModelJsonResponse(rawText) {
 }
 
 function buildByokInstruction(actionMode) {
+  const custom = getActiveCustomPrompt();
+  if (actionMode === "solve" && custom) {
+    return custom;
+  }
   if (actionMode === "rewrite") {
     return 'Rewrite cleanly and politely while keeping exact meaning. Return ONLY raw JSON: {"verification":"tone checked","detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}';
   }
@@ -351,6 +415,7 @@ function buildByokInstruction(actionMode) {
 }
 
 async function querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout) {
+  const modality = imgB64 ? "img" : "txt";
   const parts = [{ text: `${sysInstruction}\n\n${promptText}` }];
   if (imgB64) {
     parts.push({
@@ -404,14 +469,15 @@ async function querySingleGeminiModel(key, model, sysInstruction, promptText, im
   }
 
   if (res.status === 429 || res.status === 503 || res.status === 504) {
-    setByokCooldown(key, model, 45000);
+    setByokCooldown(key, model, 45000, modality);
   } else if (res.status === 404 || res.status === 400) {
-    setByokCooldown(key, model, 3600000);
+    setByokCooldown(key, model, 3600000, modality);
   }
   throw new Error(`${model}:${res.status}`);
 }
 
-async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruction, promptText, imgB64, reqTimeout) {
+async function querySingleOpenAiCompat(key, endpoint, model, providerTag, sysInstruction, promptText, imgB64, reqTimeout) {
+  const modality = imgB64 ? "img" : "txt";
   const messages = imgB64
     ? [
         {
@@ -434,32 +500,30 @@ async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruct
     model,
     messages,
     temperature: 0.0,
-    max_tokens: 1200,
+    max_tokens: 1100,
   };
 
-  if (isGroq && model.includes("gpt-oss")) {
+  if (providerTag === "groq" && model.includes("gpt-oss")) {
     body.reasoning_effort = "medium";
+  } else if (providerTag === "cerebras" && (model.includes("gpt-oss") || model.includes("qwen-3.8"))) {
+    body.reasoning_effort = "low";
   }
-  if (isGroq && !imgB64) {
+  if ((providerTag === "groq" || providerTag === "cerebras" || providerTag === "mistral") && !imgB64) {
     body.response_format = { type: "json_object" };
   }
 
-  let res = await httpsJsonRequest(
-    endpoint,
-    { Authorization: `Bearer ${key}` },
-    body,
-    reqTimeout
-  );
+  const headers = { Authorization: `Bearer ${key}` };
+  if (providerTag === "openrouter") {
+    headers["HTTP-Referer"] = "https://study-buddy-brain.onrender.com";
+    headers["X-Title"] = "Cursor Companion";
+  }
+
+  let res = await httpsJsonRequest(endpoint, headers, body, reqTimeout);
 
   if (res.status === 400 && (body.response_format || body.reasoning_effort)) {
     delete body.response_format;
     delete body.reasoning_effort;
-    res = await httpsJsonRequest(
-      endpoint,
-      { Authorization: `Bearer ${key}` },
-      body,
-      reqTimeout
-    );
+    res = await httpsJsonRequest(endpoint, headers, body, reqTimeout);
   }
 
   if (res.status === 200) {
@@ -475,9 +539,9 @@ async function querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruct
   }
 
   if (res.status === 429 || res.status === 503 || res.status === 504) {
-    setByokCooldown(key, model, 30000);
+    setByokCooldown(key, model, 30000, modality);
   } else if (res.status === 400 || res.status === 404) {
-    setByokCooldown(key, model, 3600000);
+    setByokCooldown(key, model, 3600000, modality);
   }
   throw new Error(`${model}:${res.status}`);
 }
@@ -490,62 +554,105 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
       detected_type: "ERROR",
       cursor_pill: "Invalid key format in Alt+K",
       copy_value: "",
-      expanded_note: "Paste a valid API key starting with AIza, AQ., gsk_, nvapi-, sk-or-, or sk-",
+      expanded_note: "Paste a valid key: csk-, gsk_, AIza, AQ., mistral:, nvapi-, sk-or-, or sk-",
       key_source: "BYOK",
     };
   }
 
   const sysInstruction = buildByokInstruction(actionMode);
-  const reqTimeout = imgB64 ? 11000 : 9000;
+  const reqTimeout = imgB64 ? 12000 : 9500;
+  const modality = imgB64 ? "img" : "txt";
   const failReasons = [];
 
-  for (const key of keys) {
-    if (key.startsWith("AIza") || key.startsWith("AQ.")) {
-      const models = ["gemini-3.5-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"];
+  for (const rawKey of keys) {
+    if (rawKey.startsWith("AIza") || rawKey.startsWith("AQ.")) {
+      const models = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"];
       for (const model of models) {
-        if (isByokCoolingDown(key, model)) continue;
+        if (isByokCoolingDown(rawKey, model, modality)) continue;
         try {
-          return await querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout);
+          return await querySingleGeminiModel(rawKey, model, sysInstruction, promptText, imgB64, reqTimeout);
         } catch (err) {
           if (String(err.message || "").includes("Timeout")) {
-            setByokCooldown(key, model, 45000);
+            setByokCooldown(rawKey, model, 45000, modality);
           }
           failReasons.push(err.message || "err");
         }
       }
-    } else if (key.startsWith("gsk_") || key.startsWith("nvapi-") || key.startsWith("sk-")) {
-      const isGroq = key.startsWith("gsk_");
-      const isNvidia = key.startsWith("nvapi-");
-      const isOr = key.startsWith("sk-or-");
+    } else if (
+      rawKey.startsWith("csk-") ||
+      rawKey.startsWith("gsk_") ||
+      rawKey.startsWith("nvapi-") ||
+      rawKey.startsWith("sk-") ||
+      rawKey.toLowerCase().startsWith("mistral:")
+    ) {
+      const isCerebras = rawKey.startsWith("csk-");
+      const isGroq = rawKey.startsWith("gsk_");
+      const isNvidia = rawKey.startsWith("nvapi-");
+      const isOr = rawKey.startsWith("sk-or-");
+      const isMistral = rawKey.toLowerCase().startsWith("mistral:");
 
-      const endpoint = isGroq
-        ? "https://api.groq.com/openai/v1/chat/completions"
-        : isNvidia
-          ? "https://integrate.api.nvidia.com/v1/chat/completions"
-          : isOr
-            ? "https://openrouter.ai/api/v1/chat/completions"
-            : "https://api.openai.com/v1/chat/completions";
+      const actualKey = isMistral ? rawKey.slice(8).trim() : rawKey;
+      const providerTag = isCerebras
+        ? "cerebras"
+        : isGroq
+          ? "groq"
+          : isMistral
+            ? "mistral"
+            : isNvidia
+              ? "nvidia"
+              : isOr
+                ? "openrouter"
+                : "openai";
 
-      const modelList = isGroq
+      const endpoint = isCerebras
+        ? "https://api.cerebras.ai/v1/chat/completions"
+        : isGroq
+          ? "https://api.groq.com/openai/v1/chat/completions"
+          : isMistral
+            ? "https://api.mistral.ai/v1/chat/completions"
+            : isNvidia
+              ? "https://integrate.api.nvidia.com/v1/chat/completions"
+              : isOr
+                ? "https://openrouter.ai/api/v1/chat/completions"
+                : "https://api.openai.com/v1/chat/completions";
+
+      const modelList = isCerebras
         ? imgB64
-          ? ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
-          : ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
-        : isNvidia
-          ? ["nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3.5-lightning-30b-a3b"]
-          : isOr
-            ? ["google/gemma-4-31b-it:free", "openrouter/free"]
-            : ["gpt-4o-mini"];
+          ? ["qwen-3.8-27b"]
+          : ["gpt-oss-120b", "qwen-3.8-27b"]
+        : isGroq
+          ? imgB64
+            ? ["qwen/qwen3.8-27b"]
+            : ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
+          : isMistral
+            ? ["mistral-small-latest", "mistral-large-latest"]
+            : isNvidia
+              ? imgB64
+                ? ["mistralai/mistral-large-4-1t-a52b"]
+                : ["nvidia/nemotron-3.5-lightning-30b-a3b", "nvidia/nemotron-3.5-bolt-e4b", "mistralai/mistral-large-4-1t-a52b"]
+              : isOr
+                ? ["openrouter/free", "google/gemma-4-31b-it:free"]
+                : ["gpt-4o-mini"];
 
       for (const model of modelList) {
-        if (isByokCoolingDown(key, model)) continue;
+        if (isByokCoolingDown(actualKey, model, modality)) continue;
         try {
-          return await querySingleOpenAiCompat(key, endpoint, model, isGroq, sysInstruction, promptText, imgB64, reqTimeout);
+          return await querySingleOpenAiCompat(
+            actualKey,
+            endpoint,
+            model,
+            providerTag,
+            sysInstruction,
+            promptText,
+            imgB64,
+            reqTimeout
+          );
         } catch (err) {
           failReasons.push(err.message || "err");
         }
       }
     } else {
-      failReasons.push(`BadPrefix(${key.slice(0, 4)})`);
+      failReasons.push(`BadPrefix(${rawKey.slice(0, 4)})`);
     }
   }
 
@@ -558,9 +665,10 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   };
 }
 
-async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
+// Zero duplicate client retries — Render handles full 6-provider cascade internally
+async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
   const url = new URL(endpoint, BACKEND_URL);
-  const reqTimeout = payload.image_base64 ? 19000 : 16000;
+  const reqTimeout = payload.image_base64 ? 23000 : 20000;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -607,6 +715,53 @@ function warmBackend() {
     req.on("timeout", () => req.destroy());
     req.on("error", () => {});
   } catch (_) {}
+}
+
+// Opt-in Windows built-in WinRT OCR (0 MB added to .exe, OFF by default for exam stealth)
+function runWindowsLocalOcr(jpegBuffer) {
+  if (!settings.localOcr || process.platform !== "win32" || !jpegBuffer) {
+    return Promise.resolve("");
+  }
+
+  return new Promise((resolve) => {
+    const tmpFile = path.join(os.tmpdir(), `cc_ocr_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
+    try {
+      fs.writeFileSync(tmpFile, jpegBuffer);
+    } catch (_) {
+      return resolve("");
+    }
+
+    const escaped = tmpFile.replace(/'/g, "''");
+    const ps = `
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1' })[0]
+function Await($op, $t) { $m = $asTask.MakeGenericMethod($t); $task = $m.Invoke($null, @($op)); $task.Wait(2200) | Out-Null; if ($task.IsCompleted) { return $task.Result } else { return $null } }
+[Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime] | Out-Null
+[Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
+[Windows.Media.Ocr.OcrEngine,Windows.Media.Ocr,ContentType=WindowsRuntime] | Out-Null
+$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync('${escaped}')) ([Windows.Storage.StorageFile])
+if ($null -eq $file) { exit 0 }
+$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bmp = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+$res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
+if ($null -ne $res) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $res.Text }
+`;
+
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
+      { windowsHide: true, timeout: 2800, maxBuffer: 512 * 1024 },
+      (err, stdout) => {
+        try {
+          fs.unlinkSync(tmpFile);
+        } catch (_) {}
+        if (err || !stdout) return resolve("");
+        resolve(String(stdout).trim());
+      }
+    );
+  });
 }
 
 function createHudWindow() {
@@ -670,12 +825,8 @@ function snapToCursor(force = false) {
   if (x + lockedW > wa.x + wa.width - 6) x = pt.x - lockedW - 10;
   if (y + lockedH > wa.y + wa.height - 6) y = pt.y - lockedH - 10;
 
-  x = Math.round(
-    Math.max(wa.x + 4, Math.min(x, wa.x + wa.width - lockedW - 4))
-  );
-  y = Math.round(
-    Math.max(wa.y + 4, Math.min(y, wa.y + wa.height - lockedH - 4))
-  );
+  x = Math.round(Math.max(wa.x + 4, Math.min(x, wa.x + wa.width - lockedW - 4)));
+  y = Math.round(Math.max(wa.y + 4, Math.min(y, wa.y + wa.height - lockedH - 4)));
 
   if (force || x !== lastWinX || y !== lastWinY) {
     lastWinX = x;
@@ -711,7 +862,8 @@ function showHud(payload, autoHideMs = 0) {
   const badgeReserve =
     payload.key_source === "BYOK" ||
     payload.key_source === "BYOK_CACHE" ||
-    payload.key_source === "CACHE"
+    payload.key_source === "CACHE" ||
+    payload.key_source === "PRO"
       ? 72
       : 58;
 
@@ -976,15 +1128,14 @@ async function captureDisplayNative(display) {
   return { image: match.thumbnail, sf };
 }
 
-// Wide high-DPI safe capture (1120x760 default; full screen fallback if cropped)
-async function captureAroundCursor(boxW = 1120, boxH = 760, fullScreen = false) {
+async function captureAroundCursorBuffer(boxW = 1120, boxH = 760, fullScreen = false) {
   const pt = screen.getCursorScreenPoint();
   const disp = screen.getDisplayNearestPoint(pt);
   const { image, sf } = await captureDisplayNative(disp);
   const sz = image.getSize();
 
   if (fullScreen) {
-    return image.toJPEG(80).toString("base64");
+    return image.toJPEG(80);
   }
 
   const relX = pt.x - disp.bounds.x;
@@ -1006,14 +1157,10 @@ async function captureAroundCursor(boxW = 1120, boxH = 760, fullScreen = false) 
     Math.min(Math.round(relY * sf - cropH * 0.25), sz.height - cropH)
   );
 
-  return image
-    .crop({ x: left, y: top, width: cropW, height: cropH })
-    .toJPEG(82)
-    .toString("base64");
+  return image.crop({ x: left, y: top, width: cropW, height: cropH }).toJPEG(82);
 }
 
-// Zero-Focus 2-Corner Crop: silently captures exact rectangle between Corner 1 and Corner 2 without opening any window
-async function captureBetweenPoints(p1, p2) {
+async function captureBetweenPointsBuffer(p1, p2) {
   const disp = screen.getDisplayNearestPoint(p1);
   const { image, sf } = await captureDisplayNative(disp);
   const sz = image.getSize();
@@ -1026,9 +1173,8 @@ async function captureBetweenPoints(p1, p2) {
   const rawW = Math.abs(relX2 - relX1);
   const rawH = Math.abs(relY2 - relY1);
 
-  // Accidental double-tap (<20px): gracefully widen to a smart 1120x760 box around cursor
   if (rawW < 20 || rawH < 20) {
-    return captureAroundCursor(1120, 760, false);
+    return captureAroundCursorBuffer(1120, 760, false);
   }
 
   const pad = Math.round(28 * sf);
@@ -1038,13 +1184,30 @@ async function captureBetweenPoints(p1, p2) {
   const h = Math.min(sz.height - y, Math.round(rawH * sf + pad * 2));
 
   if (w < 10 || h < 10) {
-    return captureAroundCursor(1120, 760, false);
+    return captureAroundCursorBuffer(1120, 760, false);
   }
 
-  return image
-    .crop({ x, y, width: w, height: h })
-    .toJPEG(84)
-    .toString("base64");
+  return image.crop({ x, y, width: w, height: h }).toJPEG(84);
+}
+
+async function analyzeCapturedBuffer(jpegBuffer, actionMode = "solve") {
+  // If Turbo Local OCR is toggled ON, convert screenshot to text -> 3,000 tok/s Cerebras + 40ms shared cache
+  if (settings.localOcr) {
+    const ocrText = await runWindowsLocalOcr(jpegBuffer);
+    if (ocrText && ocrText.length >= 30) {
+      const textRes = await runAnalysisPipeline({
+        textContent: ocrText,
+        actionMode,
+      });
+      if (textRes && textRes.detected_type !== "ERROR" && !/unclear crop/i.test(String(textRes.cursor_pill || ""))) {
+        return textRes;
+      }
+    }
+  }
+  return runAnalysisPipeline({
+    imageBase64: jpegBuffer.toString("base64"),
+    actionMode,
+  });
 }
 
 function grabSelectedTextDirectly() {
@@ -1080,7 +1243,6 @@ Start-Sleep -Milliseconds 20;
 
     let checks = 0;
 
-    // Fast-fail in ~200ms on locked portals so visual scan takes over seamlessly
     const poll = setInterval(() => {
       checks++;
       const current = clipboard.readText();
@@ -1140,6 +1302,7 @@ async function runAnalysisPipeline({
 }) {
   const mode = actionMode || "solve";
   const userKey = String(settings.userApiKey || "").trim();
+  const customPrompt = mode === "solve" ? getActiveCustomPrompt() : "";
 
   const promptText = followUp
     ? `Context:\n${priorContext || ""}\n\nFollow-up:\n${followUp}`
@@ -1187,6 +1350,7 @@ async function runAnalysisPipeline({
     prior_context: priorContext || null,
     action_mode: mode,
     device_id: settings.deviceId,
+    custom_prompt: customPrompt || null,
   });
 
   if (
@@ -1209,21 +1373,17 @@ async function handleInstantScan() {
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
-    const b64 = await captureAroundCursor(1120, 760, false);
+    const buf = await captureAroundCursorBuffer(1120, 760, false);
     if (activeRequestId !== reqId) return;
 
-    let res = await runAnalysisPipeline({
-      imageBase64: b64,
-      actionMode: "solve",
-    });
+    let res = await analyzeCapturedBuffer(buf, "solve");
     if (activeRequestId !== reqId) return;
 
-    // Auto-escalate to full display capture if question/options were still cut off
     if (res && /unclear crop/i.test(String(res.cursor_pill || ""))) {
-      const fullB64 = await captureAroundCursor(1280, 860, true);
+      const fullBuf = await captureAroundCursorBuffer(1280, 860, true);
       if (activeRequestId !== reqId) return;
       res = await runAnalysisPipeline({
-        imageBase64: fullB64,
+        imageBase64: fullBuf.toString("base64"),
         actionMode: "solve",
       });
     }
@@ -1240,7 +1400,7 @@ async function handleInstantScan() {
   }
 }
 
-// Zero-Focus 2-Corner Snip (Alt+Q or F9): zero overlay window, zero clicks, zero proctor warnings
+// Zero-Focus 2-Corner Snip (F9 / Alt+Q): zero clickable overlay window, zero focus loss
 async function handleTwoCornerSnip() {
   if (isBusy) return;
 
@@ -1272,13 +1432,10 @@ async function handleTwoCornerSnip() {
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
-    const b64 = await captureBetweenPoints(p1, pt);
+    const buf = await captureBetweenPointsBuffer(p1, pt);
     if (activeRequestId !== reqId) return;
 
-    const res = await runAnalysisPipeline({
-      imageBase64: b64,
-      actionMode: "solve",
-    });
+    const res = await analyzeCapturedBuffer(buf, "solve");
     if (activeRequestId !== reqId) return;
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
@@ -1312,22 +1469,19 @@ async function handleTextAction(actionMode = "solve") {
         actionMode,
       });
     } else {
-      const b64 = await captureAroundCursor(1120, 760, false);
+      const buf = await captureAroundCursorBuffer(1120, 760, false);
       if (activeRequestId !== reqId) return;
       sourceLabel = `[Highlighted ${actionMode} Scan]`;
-      res = await runAnalysisPipeline({
-        imageBase64: b64,
-        actionMode,
-      });
+      res = await analyzeCapturedBuffer(buf, actionMode);
       if (
         activeRequestId === reqId &&
         res &&
         /unclear crop/i.test(String(res.cursor_pill || ""))
       ) {
-        const fullB64 = await captureAroundCursor(1280, 860, true);
+        const fullBuf = await captureAroundCursorBuffer(1280, 860, true);
         if (activeRequestId !== reqId) return;
         res = await runAnalysisPipeline({
-          imageBase64: fullB64,
+          imageBase64: fullBuf.toString("base64"),
           actionMode,
         });
       }
@@ -1432,6 +1586,7 @@ async function processSpotlightQuery(_event, query) {
 ipcMain.on("hud-spotlight-query", processSpotlightQuery);
 ipcMain.on("hud-followup", processSpotlightQuery);
 
+// Supports personal BYOK keys OR "share:<KEY>" to contribute 1 free key & unlock Pro Community Pool
 ipcMain.on("hud-save-key", async (_event, key) => {
   if (typeof key !== "string") return;
 
@@ -1444,7 +1599,45 @@ ipcMain.on("hud-save-key", async (_event, key) => {
   BYOK_COOLDOWN.clear();
   LOCAL_CACHE.clear();
 
-  const cleanKey = sanitizeApiKeys(key).join(", ");
+  const trimmed = key.trim();
+  if (trimmed.toLowerCase().startsWith("share:")) {
+    const sharedKey = trimmed.slice(6).trim();
+    showHud({ mode: "loading", cursor_pill: "•••" });
+    try {
+      const resp = await postJsonWithJitterRetry("/v3_1/contribute-key", {
+        api_key: sharedKey,
+        device_id: settings.deviceId,
+      });
+      if (resp && resp.ok) {
+        settings.userApiKey = "";
+        saveSettings({ userApiKey: "" });
+        syncSidecar();
+        showHud(
+          {
+            mode: "result",
+            detected_type: "DIRECT_VALUE",
+            cursor_pill: resp.message || "Pro Pool Unlocked ✓",
+            key_source: "PRO",
+            elapsed: "★",
+          },
+          3200
+        );
+      } else {
+        showHud(
+          {
+            mode: "error",
+            cursor_pill: (resp && resp.message) || "Could not verify shared key",
+          },
+          3400
+        );
+      }
+    } catch (_) {
+      showHud({ mode: "error", cursor_pill: "Share check failed — retry" }, 2800);
+    }
+    return;
+  }
+
+  const cleanKey = sanitizeApiKeys(trimmed).join(", ");
   settings.userApiKey = cleanKey;
   saveSettings({ userApiKey: cleanKey });
   syncSidecar();
@@ -1527,14 +1720,32 @@ ipcMain.on("hud-close-sidecar", () => {
 
 ipcMain.on("hud-hide", dismissAllOverlays);
 
-function createTray() {
-  const icon = nativeImage.createEmpty();
+function rebuildTrayMenu() {
+  if (!tray) return;
 
-  tray = new Tray(icon);
-  tray.setToolTip("Cursor Companion V3.1");
+  const packSubmenu = Object.entries(modePacks).map(([id, pack]) => ({
+    label: pack.label || id,
+    type: "radio",
+    checked: settings.activePack === id,
+    click: () => {
+      saveSettings({ activePack: id });
+      LOCAL_CACHE.clear();
+      rebuildTrayMenu();
+      showHud(
+        {
+          mode: "result",
+          detected_type: "DIRECT_VALUE",
+          cursor_pill: `Pack: ${pack.label || id}`,
+          elapsed: "✓",
+        },
+        2000
+      );
+    },
+  }));
+
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: "Cursor Companion V3.1 (Zero-Focus)", enabled: false },
+      { label: "Cursor Companion V3.1 (Immortal)", enabled: false },
       { type: "separator" },
       { label: "Smart Scan (F8 / Alt + A)", click: () => handleInstantScan() },
       { label: "2-Corner Snip (F9 / Alt + Q)", click: () => handleTwoCornerSnip() },
@@ -1542,14 +1753,40 @@ function createTray() {
       { label: "Rewrite Selection (Alt + W)", click: () => handleTextAction("rewrite") },
       { label: "Explain Selection (Alt + E)", click: () => handleTextAction("explain") },
       { type: "separator" },
+      { label: "Mode Packs", submenu: packSubmenu },
+      {
+        label: "Turbo Local OCR (OFF = Exam Stealth)",
+        type: "checkbox",
+        checked: Boolean(settings.localOcr),
+        click: (menuItem) => {
+          saveSettings({ localOcr: Boolean(menuItem.checked) });
+          showHud(
+            {
+              mode: "result",
+              detected_type: "DIRECT_VALUE",
+              cursor_pill: menuItem.checked ? "Turbo OCR ON ⚡" : "Exam Stealth Mode ✓",
+              elapsed: "✓",
+            },
+            2000
+          );
+        },
+      },
+      { type: "separator" },
       { label: "Spotlight Bar (Alt + G)", click: () => openSpotlight("ask") },
       { label: "Study Sidecar (Alt + D)", click: () => toggleSidecar() },
-      { label: "Personal Key (Alt + K)", click: () => openSpotlight("key") },
+      { label: "Personal Key / Share Pro (Alt + K)", click: () => openSpotlight("key") },
       { label: "Cancel / Reset (F10 / Alt + X)", click: () => dismissAllOverlays() },
       { type: "separator" },
       { label: "Quit", click: () => app.quit() },
     ])
   );
+}
+
+function createTray() {
+  const icon = nativeImage.createEmpty();
+  tray = new Tray(icon);
+  tray.setToolTip("Cursor Companion V3.1");
+  rebuildTrayMenu();
 }
 
 function registerShortcut(accelerator, handler) {
@@ -1571,6 +1808,7 @@ if (!gotSingleInstanceLock) {
   app.whenReady()
     .then(() => {
       initSettingsPath();
+      loadModePacks();
       settings = loadSettings();
       saveSettings({});
 

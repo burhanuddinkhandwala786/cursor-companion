@@ -10,6 +10,7 @@ const {
   Menu,
   nativeImage,
   shell,
+  safeStorage,
 } = require("electron");
 
 const path = require("path");
@@ -52,10 +53,22 @@ let lockedH = 24;
 let lastWinX = -9999;
 let lastWinY = -9999;
 
+// Global crash immunity: app never silently exits mid-session
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err && err.message ? err.message : err);
+  isBusy = false;
+  clearTimeout(busyWatchdog);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+  isBusy = false;
+  clearTimeout(busyWatchdog);
+});
+
 let settings = {
   userApiKey: "",
   autoCopy: true,
-  localOcr: false, // Keep OFF for zero-process stealth on SHL/AMCAT; toggle ON in Tray for Turbo OCR + Cross-User Cache
+  localOcr: false, // Keep OFF for zero-process stealth on SHL/AMCAT; toggle ON in Tray for Turbo OCR
   activePack: "default",
   deviceId: crypto.randomUUID(),
 };
@@ -63,19 +76,28 @@ let settings = {
 const DEFAULT_BYOK_MODELS = {
   groq_text: ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
   groq_vision: ["qwen/qwen3.8-27b"],
-  gemini: ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"],
-  mistral_text: ["mistral-small-latest"],
-  mistral_vision: ["mistral-small-latest"],
-  openrouter_text: ["openrouter/free", "google/gemma-4-31b-it:free"],
-  openrouter_vision: ["openrouter/free", "google/gemma-4-31b-it:free"],
-  cerebras_text: ["gpt-oss-120b", "qwen-3.8-27b"],
-  cerebras_vision: ["qwen-3.8-27b"],
   nvidia_text: [
     "nvidia/nemotron-3.5-lightning-30b-a3b",
     "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
     "mistralai/mistral-large-4-1t-a52b",
   ],
-  nvidia_vision: ["mistralai/mistral-large-4-1t-a52b"],
+  nvidia_vision: [
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
+    "mistralai/mistral-large-4-1t-a52b",
+    "nvidia/nemotron-3.5-bolt-e4b",
+  ],
+  gemini: ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"],
+  openrouter_text: ["openrouter/free", "google/gemma-4-31b-it:free"],
+  openrouter_vision: [
+    "openrouter/free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "google/gemma-4-31b-it:free",
+  ],
+  cerebras_text: ["gpt-oss-120b", "qwen-3.8-27b"],
+  cerebras_vision: ["qwen-3.8-27b"],
+  mistral_text: ["mistral-small-latest"],
+  mistral_vision: ["mistral-small-latest"],
 };
 
 let remoteConfig = {
@@ -209,6 +231,31 @@ function getActiveCustomPrompt() {
     : "";
 }
 
+// Hardware-backed Windows DPAPI encryption for personal API keys at rest
+function encryptKeyForDisk(plainKey) {
+  if (!plainKey) return { userApiKeyEnc: "", userApiKey: "" };
+  try {
+    if (safeStorage && safeStorage.isEncryptionAvailable()) {
+      return {
+        userApiKeyEnc: safeStorage.encryptString(plainKey).toString("base64"),
+        userApiKey: "",
+      };
+    }
+  } catch (_) {}
+  return { userApiKeyEnc: "", userApiKey: plainKey };
+}
+
+function decryptKeyFromDisk(saved) {
+  if (saved && typeof saved.userApiKeyEnc === "string" && saved.userApiKeyEnc) {
+    try {
+      if (safeStorage && safeStorage.isEncryptionAvailable()) {
+        return safeStorage.decryptString(Buffer.from(saved.userApiKeyEnc, "base64"));
+      }
+    } catch (_) {}
+  }
+  return saved && typeof saved.userApiKey === "string" ? saved.userApiKey : "";
+}
+
 function loadSettings() {
   let saved = {};
   try {
@@ -221,8 +268,7 @@ function loadSettings() {
   } catch (_) {}
 
   return {
-    ...saved,
-    userApiKey: typeof saved.userApiKey === "string" ? saved.userApiKey : "",
+    userApiKey: decryptKeyFromDisk(saved),
     autoCopy: typeof saved.autoCopy === "boolean" ? saved.autoCopy : true,
     localOcr: typeof saved.localOcr === "boolean" ? saved.localOcr : false,
     activePack: typeof saved.activePack === "string" && saved.activePack ? saved.activePack : "default",
@@ -237,8 +283,17 @@ function saveSettings(next) {
   settings = { ...settings, ...next };
   if (!SETTINGS_PATH) return;
   try {
+    const encryptedFields = encryptKeyForDisk(settings.userApiKey || "");
+    const toPersist = {
+      autoCopy: settings.autoCopy,
+      localOcr: settings.localOcr,
+      activePack: settings.activePack,
+      deviceId: settings.deviceId,
+      userApiKeyEnc: encryptedFields.userApiKeyEnc,
+      ...(encryptedFields.userApiKey ? { userApiKey: encryptedFields.userApiKey } : {}),
+    };
     fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), "utf8");
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(toPersist, null, 2), "utf8");
   } catch (error) {
     console.error("Unable to save settings:", error.message);
   }
@@ -292,7 +347,18 @@ function isNewerVersion(remoteVer, currentVer) {
   return false;
 }
 
-// Native C++ WDA_EXCLUDEFROMCAPTURE via Electron — zero powershell.exe spawns
+// Native C++ WDA_EXCLUDEFROMCAPTURE + strict WebContents navigation lockdown
+function hardenWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.setContentProtection(true);
+  } catch (_) {}
+  try {
+    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    win.webContents.on("will-navigate", (e) => e.preventDefault());
+  } catch (_) {}
+}
+
 function enforceCaptureInvisibility(win) {
   if (!win || win.isDestroyed()) return;
   try {
@@ -365,7 +431,7 @@ function syncEscapeShortcut() {
 }
 
 // Force IPv4 (family: 4) to prevent Windows IPv6 DNS stalls
-function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 12000) {
+function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 13000) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(bodyObj);
     const url = new URL(urlStr);
@@ -440,7 +506,6 @@ function httpsGetJson(urlStr, timeoutMs = 10000) {
   });
 }
 
-// Wakes backend + syncs dynamic BYOK models & update metadata silently on startup
 async function syncRemoteConfig() {
   try {
     const data = await httpsGetJson(BACKEND_URL + "/v3_1/config", 12000);
@@ -457,7 +522,7 @@ async function syncRemoteConfig() {
   } catch (_) {}
 }
 
-// Brace-safe JSON parser: never breaks on coding questions or math sets containing {}
+// Brace-safe JSON parser: never breaks on code/math containing {}
 function parseModelJsonResponse(rawText) {
   const cleaned = String(rawText || "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -628,8 +693,6 @@ async function querySingleOpenAiCompat(key, endpoint, model, providerTag, sysIns
 
   if (providerTag === "groq" && model.includes("gpt-oss")) {
     body.reasoning_effort = "medium";
-  } else if (providerTag === "cerebras" && (model.includes("gpt-oss") || model.includes("qwen-3.8"))) {
-    body.reasoning_effort = "low";
   }
   if ((providerTag === "groq" || providerTag === "cerebras" || providerTag === "mistral") && !imgB64) {
     body.response_format = { type: "json_object" };
@@ -679,13 +742,13 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
       detected_type: "ERROR",
       cursor_pill: "Invalid key format in Alt+K",
       copy_value: "",
-      expanded_note: "Paste a valid key: gsk_, AIza, AQ., mistral:, sk-or-, csk-, nvapi-, or sk-",
+      expanded_note: "Paste a valid key: gsk_, nvapi-, AIza, AQ., sk-or-, csk-, mistral:, or sk-",
       key_source: "BYOK",
     };
   }
 
   const sysInstruction = buildByokInstruction(actionMode);
-  const reqTimeout = imgB64 ? 12000 : 9500;
+  const reqTimeout = imgB64 ? 14000 : 11000;
   const modality = imgB64 ? "img" : "txt";
   const failReasons = [];
 
@@ -705,52 +768,52 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
       }
     } else if (
       rawKey.startsWith("gsk_") ||
-      rawKey.startsWith("csk-") ||
       rawKey.startsWith("nvapi-") ||
       rawKey.startsWith("sk-") ||
+      rawKey.startsWith("csk-") ||
       rawKey.toLowerCase().startsWith("mistral:")
     ) {
       const isGroq = rawKey.startsWith("gsk_");
-      const isCerebras = rawKey.startsWith("csk-");
       const isNvidia = rawKey.startsWith("nvapi-");
       const isOr = rawKey.startsWith("sk-or-");
+      const isCerebras = rawKey.startsWith("csk-");
       const isMistral = rawKey.toLowerCase().startsWith("mistral:");
 
       const actualKey = isMistral ? rawKey.slice(8).trim() : rawKey;
       const providerTag = isGroq
         ? "groq"
-        : isMistral
-          ? "mistral"
+        : isNvidia
+          ? "nvidia"
           : isOr
             ? "openrouter"
             : isCerebras
               ? "cerebras"
-              : isNvidia
-                ? "nvidia"
+              : isMistral
+                ? "mistral"
                 : "openai";
 
       const endpoint = isGroq
         ? "https://api.groq.com/openai/v1/chat/completions"
-        : isMistral
-          ? "https://api.mistral.ai/v1/chat/completions"
+        : isNvidia
+          ? "https://integrate.api.nvidia.com/v1/chat/completions"
           : isOr
             ? "https://openrouter.ai/api/v1/chat/completions"
             : isCerebras
               ? "https://api.cerebras.ai/v1/chat/completions"
-              : isNvidia
-                ? "https://integrate.api.nvidia.com/v1/chat/completions"
+              : isMistral
+                ? "https://api.mistral.ai/v1/chat/completions"
                 : "https://api.openai.com/v1/chat/completions";
 
       const modelList = isGroq
         ? getByokModels(imgB64 ? "groq_vision" : "groq_text")
-        : isMistral
-          ? getByokModels(imgB64 ? "mistral_vision" : "mistral_text")
+        : isNvidia
+          ? getByokModels(imgB64 ? "nvidia_vision" : "nvidia_text")
           : isOr
             ? getByokModels(imgB64 ? "openrouter_vision" : "openrouter_text")
             : isCerebras
               ? getByokModels(imgB64 ? "cerebras_vision" : "cerebras_text")
-              : isNvidia
-                ? getByokModels(imgB64 ? "nvidia_vision" : "nvidia_text")
+              : isMistral
+                ? getByokModels(imgB64 ? "mistral_vision" : "mistral_text")
                 : ["gpt-4o-mini"];
 
       for (const model of modelList) {
@@ -784,7 +847,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   };
 }
 
-// Zero duplicate client retries — Render handles the full permanent cascade internally
+// Zero duplicate client retries — Render handles the full 5-provider cascade internally
 async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
   const url = new URL(endpoint, BACKEND_URL);
   const reqTimeout = payload.image_base64 ? 23000 : 20000;
@@ -836,7 +899,7 @@ function warmBackend() {
   } catch (_) {}
 }
 
-// Opt-in Windows built-in WinRT OCR (0 MB added to .exe, OFF by default for exam stealth)
+// Opt-in Windows built-in WinRT OCR (0 MB added, OFF by default for exam stealth)
 function runWindowsLocalOcr(jpegBuffer) {
   if (!settings.localOcr || process.platform !== "win32" || !jpegBuffer) {
     return Promise.resolve("");
@@ -902,6 +965,7 @@ function createHudWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
     },
   });
 
@@ -910,7 +974,7 @@ function createHudWindow() {
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setIgnoreMouseEvents(true, { forward: true });
-  enforceCaptureInvisibility(win);
+  hardenWindow(win);
 
   win.webContents.on("did-finish-load", () => {
     if (!win.isDestroyed() && pendingHudState) {
@@ -1100,6 +1164,7 @@ function openSpotlight(initialMode = "ask") {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
     },
   });
 
@@ -1107,7 +1172,7 @@ function openSpotlight(initialMode = "ask") {
 
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  enforceCaptureInvisibility(win);
+  hardenWindow(win);
 
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;
@@ -1180,6 +1245,7 @@ function toggleSidecar() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
     },
   });
 
@@ -1187,7 +1253,7 @@ function toggleSidecar() {
 
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  enforceCaptureInvisibility(win);
+  hardenWindow(win);
 
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;

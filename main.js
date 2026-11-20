@@ -15,7 +15,6 @@ const {
 
 const path = require("path");
 const fs = require("fs");
-const os = require("os");
 const https = require("https");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
@@ -25,10 +24,13 @@ const BACKEND_URL = "https://study-buddy-brain.onrender.com";
 let SETTINGS_PATH = "";
 let PACKS_PATH = "";
 let REMOTE_CONFIG_PATH = "";
+let SHORTCUT_PRELOAD_PATH = "";
+let SHORTCUT_HTML_PATH = "";
 
 let hudWin = null;
 let spotlightWin = null;
 let sidecarWin = null;
+let shortcutWin = null;
 let tray = null;
 
 let isPinned = false;
@@ -37,6 +39,7 @@ let activeRequestId = 0;
 let busyWatchdog = null;
 let snipCorner1 = null;
 let snipCornerTimer = null;
+let hudSuppressed = false;
 
 let escRegistered = false;
 let hideTimer = null;
@@ -53,7 +56,8 @@ let lockedH = 24;
 let lastWinX = -9999;
 let lastWinY = -9999;
 
-// Global crash immunity: app never silently exits mid-session
+const failedShortcuts = new Set();
+
 process.on("uncaughtException", (err) => {
   console.error("Uncaught exception:", err && err.message ? err.message : err);
   isBusy = false;
@@ -65,29 +69,64 @@ process.on("unhandledRejection", (reason) => {
   clearTimeout(busyWatchdog);
 });
 
+const DEFAULT_SHORTCUTS = {
+  smartScan: "F8",
+  smartScanAlt: "Alt+A",
+  twoCornerSnip: "F9",
+  twoCornerSnipAlt: "Alt+Q",
+  solveText: "Alt+C",
+  rewriteText: "Alt+W",
+  explainText: "Alt+E",
+  ghostPaste: "Alt+Enter",
+  spotlight: "Alt+G",
+  followup: "Alt+F",
+  apiKey: "Alt+K",
+  sidecar: "Alt+D",
+  pinHud: "Alt+P",
+  cycleHistory: "Alt+H",
+  hideOnly: "Alt+X",
+  forceReset: "F10",
+};
+
+const SHORTCUT_LABELS = [
+  ["smartScan", "Smart Screen Scan (Primary)"],
+  ["smartScanAlt", "Smart Screen Scan (Alt Alias)"],
+  ["twoCornerSnip", "2-Corner Zero-Focus Snip (Primary)"],
+  ["twoCornerSnipAlt", "2-Corner Snip (Alt Alias)"],
+  ["solveText", "Solve Highlighted Text"],
+  ["rewriteText", "Rewrite Highlighted Text"],
+  ["explainText", "Explain Highlighted Text"],
+  ["hideOnly", "Vanish / Hide Overlay Only (No Reset)"],
+  ["forceReset", "Force Cancel & Reset Stuck Scan"],
+  ["sidecar", "Toggle Study Sidecar History"],
+  ["spotlight", "Open Spotlight Ask Bar"],
+  ["followup", "Ask Follow-Up on Last Answer"],
+  ["apiKey", "Personal API Key / Pro Share"],
+  ["pinHud", "Pin / Unpin HUD Pill"],
+  ["cycleHistory", "Cycle Previous Answers"],
+  ["ghostPaste", "Ghost Paste Active Answer"],
+];
+
 let settings = {
   userApiKey: "",
   autoCopy: true,
-  localOcr: false, // Keep OFF for zero-process stealth on SHL/AMCAT; toggle ON in Tray for Turbo OCR
   activePack: "default",
   deviceId: crypto.randomUUID(),
+  shortcuts: { ...DEFAULT_SHORTCUTS },
 };
 
 const DEFAULT_BYOK_MODELS = {
   groq_text: ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
   groq_vision: ["qwen/qwen3.8-27b"],
+  gemini: ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"],
   nvidia_text: [
     "nvidia/nemotron-3.5-lightning-30b-a3b",
     "nvidia/nemotron-3.5-bolt-e4b",
-    "nvidia/nemotron-3.5-super-vl-120b-a12b",
-    "mistralai/mistral-large-4-1t-a52b",
   ],
   nvidia_vision: [
     "nvidia/nemotron-3.5-super-vl-120b-a12b",
-    "mistralai/mistral-large-4-1t-a52b",
     "nvidia/nemotron-3.5-bolt-e4b",
   ],
-  gemini: ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"],
   openrouter_text: ["openrouter/free", "google/gemma-4-31b-it:free"],
   openrouter_vision: [
     "openrouter/free",
@@ -207,6 +246,8 @@ function initSettingsPath() {
   SETTINGS_PATH = path.join(userDir, "v3-settings.json");
   PACKS_PATH = path.join(userDir, "mode-packs.json");
   REMOTE_CONFIG_PATH = path.join(userDir, "remote-config.json");
+  SHORTCUT_PRELOAD_PATH = path.join(userDir, "shortcut-preload.js");
+  SHORTCUT_HTML_PATH = path.join(userDir, "shortcut-editor.html");
 }
 
 function loadModePacks() {
@@ -231,7 +272,6 @@ function getActiveCustomPrompt() {
     : "";
 }
 
-// Hardware-backed Windows DPAPI encryption for personal API keys at rest
 function encryptKeyForDisk(plainKey) {
   if (!plainKey) return { userApiKeyEnc: "", userApiKey: "" };
   try {
@@ -256,6 +296,18 @@ function decryptKeyFromDisk(saved) {
   return saved && typeof saved.userApiKey === "string" ? saved.userApiKey : "";
 }
 
+function sanitizeShortcutsMap(rawMap) {
+  const merged = { ...DEFAULT_SHORTCUTS };
+  if (rawMap && typeof rawMap === "object" && !Array.isArray(rawMap)) {
+    for (const key of Object.keys(DEFAULT_SHORTCUTS)) {
+      if (typeof rawMap[key] === "string") {
+        merged[key] = rawMap[key].trim();
+      }
+    }
+  }
+  return merged;
+}
+
 function loadSettings() {
   let saved = {};
   try {
@@ -270,25 +322,29 @@ function loadSettings() {
   return {
     userApiKey: decryptKeyFromDisk(saved),
     autoCopy: typeof saved.autoCopy === "boolean" ? saved.autoCopy : true,
-    localOcr: typeof saved.localOcr === "boolean" ? saved.localOcr : false,
     activePack: typeof saved.activePack === "string" && saved.activePack ? saved.activePack : "default",
     deviceId:
       typeof saved.deviceId === "string" && saved.deviceId.trim()
         ? saved.deviceId
         : crypto.randomUUID(),
+    shortcuts: sanitizeShortcutsMap(saved.shortcuts),
   };
 }
 
 function saveSettings(next) {
-  settings = { ...settings, ...next };
+  settings = {
+    ...settings,
+    ...next,
+    shortcuts: sanitizeShortcutsMap(next.shortcuts || settings.shortcuts),
+  };
   if (!SETTINGS_PATH) return;
   try {
     const encryptedFields = encryptKeyForDisk(settings.userApiKey || "");
     const toPersist = {
       autoCopy: settings.autoCopy,
-      localOcr: settings.localOcr,
       activePack: settings.activePack,
       deviceId: settings.deviceId,
+      shortcuts: settings.shortcuts,
       userApiKeyEnc: encryptedFields.userApiKeyEnc,
       ...(encryptedFields.userApiKey ? { userApiKey: encryptedFields.userApiKey } : {}),
     };
@@ -347,7 +403,6 @@ function isNewerVersion(remoteVer, currentVer) {
   return false;
 }
 
-// Native C++ WDA_EXCLUDEFROMCAPTURE + strict WebContents navigation lockdown
 function hardenWindow(win) {
   if (!win || win.isDestroyed()) return;
   try {
@@ -367,6 +422,7 @@ function enforceCaptureInvisibility(win) {
 }
 
 function beginRequest() {
+  hudSuppressed = false;
   activeRequestId += 1;
   const reqId = activeRequestId;
   isBusy = true;
@@ -374,9 +430,11 @@ function beginRequest() {
   busyWatchdog = setTimeout(() => {
     if (activeRequestId === reqId && isBusy) {
       isBusy = false;
-      showHud({ mode: "error", cursor_pill: "Timed out — press F8/Alt+A" }, 2600);
+      if (!hudSuppressed) {
+        showHud({ mode: "error", cursor_pill: "Timed out — retry scan" }, 2400);
+      }
     }
-  }, 27000);
+  }, 21000);
   return reqId;
 }
 
@@ -394,8 +452,23 @@ function clearSnipCorner() {
   snipCornerTimer = null;
 }
 
-function dismissAllOverlays() {
+// Alt+X / Esc: Vanish/Hide visually ONLY — never cancels an in-flight scan or resets history/state
+function hideOverlaysOnly() {
+  hudSuppressed = true;
+  clearTimeout(hideTimer);
+  stopCursorFollow();
+
+  for (const win of [spotlightWin, sidecarWin, hudWin]) {
+    if (win && !win.isDestroyed()) win.hide();
+  }
+
+  syncEscapeShortcut();
+}
+
+// F10 (customizable): Hard cancel & full reset of any stuck scan or 2-corner snip
+function forceResetAll() {
   isPinned = false;
+  hudSuppressed = false;
   activeRequestId += 1;
   isBusy = false;
   clearTimeout(busyWatchdog);
@@ -412,15 +485,14 @@ function dismissAllOverlays() {
 }
 
 function syncEscapeShortcut() {
-  const anyOpen =
-    Boolean(snipCorner1) ||
-    [hudWin, spotlightWin, sidecarWin].some(
-      (win) => win && !win.isDestroyed() && win.isVisible()
-    );
+  if (shortcutWin && !shortcutWin.isDestroyed()) return;
+  const anyOpen = [hudWin, spotlightWin, sidecarWin].some(
+    (win) => win && !win.isDestroyed() && win.isVisible()
+  );
 
   if (anyOpen && !escRegistered) {
     try {
-      escRegistered = globalShortcut.register("Escape", dismissAllOverlays);
+      escRegistered = globalShortcut.register("Escape", hideOverlaysOnly);
     } catch (_) {}
   } else if (!anyOpen && escRegistered) {
     try {
@@ -430,8 +502,7 @@ function syncEscapeShortcut() {
   }
 }
 
-// Force IPv4 (family: 4) to prevent Windows IPv6 DNS stalls
-function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 13000) {
+function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 11000) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(bodyObj);
     const url = new URL(urlStr);
@@ -508,7 +579,7 @@ function httpsGetJson(urlStr, timeoutMs = 10000) {
 
 async function syncRemoteConfig() {
   try {
-    const data = await httpsGetJson(BACKEND_URL + "/v3_1/config", 12000);
+    const data = await httpsGetJson(BACKEND_URL + "/v3_1/config", 10000);
     if (data && typeof data === "object") {
       mergeRemoteConfig(data);
       if (REMOTE_CONFIG_PATH) {
@@ -522,7 +593,6 @@ async function syncRemoteConfig() {
   } catch (_) {}
 }
 
-// Brace-safe JSON parser: never breaks on code/math containing {}
 function parseModelJsonResponse(rawText) {
   const cleaned = String(rawText || "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -688,11 +758,11 @@ async function querySingleOpenAiCompat(key, endpoint, model, providerTag, sysIns
     model,
     messages,
     temperature: 0.0,
-    max_tokens: 1100,
+    max_tokens: 900,
   };
 
   if (providerTag === "groq" && model.includes("gpt-oss")) {
-    body.reasoning_effort = "medium";
+    body.reasoning_effort = "low";
   }
   if ((providerTag === "groq" || providerTag === "cerebras" || providerTag === "mistral") && !imgB64) {
     body.response_format = { type: "json_object" };
@@ -748,7 +818,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   }
 
   const sysInstruction = buildByokInstruction(actionMode);
-  const reqTimeout = imgB64 ? 14000 : 11000;
+  const reqTimeout = imgB64 ? 10500 : 8500;
   const modality = imgB64 ? "img" : "txt";
   const failReasons = [];
 
@@ -847,10 +917,9 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   };
 }
 
-// Zero duplicate client retries — Render handles the full 5-provider cascade internally
 async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
   const url = new URL(endpoint, BACKEND_URL);
-  const reqTimeout = payload.image_base64 ? 23000 : 20000;
+  const reqTimeout = payload.image_base64 ? 18000 : 15000;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -863,7 +932,7 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
 
       if (res.status >= 500 && attempt < retries) {
         await new Promise((resolve) =>
-          setTimeout(resolve, 250 + Math.floor(Math.random() * 350))
+          setTimeout(resolve, 200 + Math.floor(Math.random() * 250))
         );
         continue;
       }
@@ -876,7 +945,7 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
     } catch (error) {
       if (attempt >= retries) throw error;
       await new Promise((resolve) =>
-        setTimeout(resolve, 250 + Math.floor(Math.random() * 350))
+        setTimeout(resolve, 200 + Math.floor(Math.random() * 250))
       );
     }
   }
@@ -897,53 +966,6 @@ function warmBackend() {
     req.on("timeout", () => req.destroy());
     req.on("error", () => {});
   } catch (_) {}
-}
-
-// Opt-in Windows built-in WinRT OCR (0 MB added, OFF by default for exam stealth)
-function runWindowsLocalOcr(jpegBuffer) {
-  if (!settings.localOcr || process.platform !== "win32" || !jpegBuffer) {
-    return Promise.resolve("");
-  }
-
-  return new Promise((resolve) => {
-    const tmpFile = path.join(os.tmpdir(), `cc_ocr_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
-    try {
-      fs.writeFileSync(tmpFile, jpegBuffer);
-    } catch (_) {
-      return resolve("");
-    }
-
-    const escaped = tmpFile.replace(/'/g, "''");
-    const ps = `
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
-$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation\`1' })[0]
-function Await($op, $t) { $m = $asTask.MakeGenericMethod($t); $task = $m.Invoke($null, @($op)); $task.Wait(2200) | Out-Null; if ($task.IsCompleted) { return $task.Result } else { return $null } }
-[Windows.Storage.StorageFile,Windows.Storage,ContentType=WindowsRuntime] | Out-Null
-[Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
-[Windows.Media.Ocr.OcrEngine,Windows.Media.Ocr,ContentType=WindowsRuntime] | Out-Null
-$file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync('${escaped}')) ([Windows.Storage.StorageFile])
-if ($null -eq $file) { exit 0 }
-$stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
-$decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
-$bmp = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
-$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
-$res = Await ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
-if ($null -ne $res) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Write-Output $res.Text }
-`;
-
-    execFile(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-      { windowsHide: true, timeout: 2800, maxBuffer: 512 * 1024 },
-      (err, stdout) => {
-        try {
-          fs.unlinkSync(tmpFile);
-        } catch (_) {}
-        if (err || !stdout) return resolve("");
-        resolve(String(stdout).trim());
-      }
-    );
-  });
 }
 
 function createHudWindow() {
@@ -1038,6 +1060,7 @@ function stopCursorFollow() {
 function showHud(payload, autoHideMs = 0) {
   if (!hudWin || hudWin.isDestroyed()) createHudWindow();
 
+  hudSuppressed = false;
   clearTimeout(hideTimer);
 
   const isLoading = payload.mode === "loading";
@@ -1291,6 +1314,164 @@ function syncSidecar() {
   }
 }
 
+// --- Built-in GUI Shortcut Customizer (zero edits needed to index.html or preload.js) ---
+function ensureShortcutEditorAssets() {
+  const preloadCode = [
+    'const { contextBridge, ipcRenderer } = require("electron");',
+    'contextBridge.exposeInMainWorld("shortcutApi", {',
+    '  getData: () => ipcRenderer.invoke("shortcuts-get"),',
+    '  save: (map) => ipcRenderer.invoke("shortcuts-save", map),',
+    '  reset: () => ipcRenderer.invoke("shortcuts-reset"),',
+    '  close: () => ipcRenderer.send("shortcuts-close"),',
+    "});",
+  ].join("\n");
+
+  const editorHtml = [
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Customize Shortcuts</title>",
+    "<style>",
+    "*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}",
+    "body{background:#0b1020;color:#eef2ff;padding:18px;user-select:none}",
+    "h2{font-size:16px;margin-bottom:4px}",
+    ".sub{font-size:12px;color:#94a3b8;margin-bottom:14px}",
+    ".list{max-height:370px;overflow-y:auto;border:1px solid rgba(255,255,255,0.1);border-radius:10px;background:#11182c}",
+    ".row{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.06);gap:10px}",
+    ".row:last-child{border-bottom:none}",
+    ".lbl{font-size:12.5px;color:#dbeafe}",
+    ".ctrl{display:flex;align-items:center;gap:6px}",
+    ".keybtn{min-width:130px;padding:5px 10px;border-radius:7px;border:1px solid rgba(255,255,255,0.18);background:#1e293b;color:#f8fafc;font-size:12px;font-weight:600;cursor:pointer;text-align:center}",
+    ".keybtn.rec{border-color:#22d3ee;background:#0e7490;color:#fff}",
+    ".keybtn.clash{border-color:#f87171;color:#fecaca}",
+    ".clr{padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:transparent;color:#94a3b8;font-size:11px;cursor:pointer}",
+    ".clr:hover{color:#fff;border-color:rgba(255,255,255,0.3)}",
+    ".bar{display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:8px}",
+    ".btn{padding:8px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:#1e293b;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer}",
+    ".btn.primary{background:#4f46e5;border-color:#6366f1}",
+    ".msg{font-size:12px;color:#6ee7b7;min-height:16px;margin-top:8px}",
+    "</style></head><body>",
+    "<h2>Customize Global Shortcuts</h2>",
+    "<div class='sub'>Click any shortcut box, then press your desired key combo. Click Clear to disable a clashing hotkey.</div>",
+    "<div class='list' id='list'></div>",
+    "<div class='msg' id='msg'></div>",
+    "<div class='bar'>",
+    "  <button class='btn' id='resetBtn'>Reset Defaults</button>",
+    "  <div style='display:flex;gap:8px'>",
+    "    <button class='btn' id='closeBtn'>Close</button>",
+    "    <button class='btn primary' id='saveBtn'>Save & Apply</button>",
+    "  </div>",
+    "</div>",
+    "<script>",
+    "let state = {}; let labels = []; let failed = new Set(); let activeKey = null;",
+    "function keyToAccel(e) {",
+    "  const mods = [];",
+    "  if (e.ctrlKey) mods.push('Control');",
+    "  if (e.altKey) mods.push('Alt');",
+    "  if (e.shiftKey) mods.push('Shift');",
+    "  if (e.metaKey) mods.push('Super');",
+    "  const k = e.key;",
+    "  const c = e.code || '';",
+    "  if (['Control','Alt','Shift','Meta'].includes(k)) return null;",
+    "  if (k === 'Escape') return 'CANCEL';",
+    "  let main = '';",
+    "  if (/^F([1-9]|1[0-2])$/i.test(k)) main = k.toUpperCase();",
+    "  else if (/^Key([A-Z])$/.test(c)) main = c.slice(3);",
+    "  else if (/^Digit([0-9])$/.test(c)) main = c.slice(5);",
+    "  else if (k === ' ') main = 'Space';",
+    "  else if (k === 'Enter') main = 'Enter';",
+    "  else if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(k)) main = k.replace('Arrow','');",
+    "  else if (['Tab','Backspace','Delete','Insert','Home','End','PageUp','PageDown'].includes(k)) main = k;",
+    "  else if (k.length === 1) main = k.toUpperCase();",
+    "  else return null;",
+    "  if (mods.length === 0 && !/^F([1-9]|1[0-2])$/.test(main)) return null;",
+    "  return mods.concat([main]).join('+');",
+    "}",
+    "function render() {",
+    "  const list = document.getElementById('list');",
+    "  list.innerHTML = '';",
+    "  labels.forEach(([id, title]) => {",
+    "    const row = document.createElement('div'); row.className = 'row';",
+    "    const lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = title;",
+    "    const ctrl = document.createElement('div'); ctrl.className = 'ctrl';",
+    "    const btn = document.createElement('button');",
+    "    const val = state[id] || '';",
+    "    btn.className = 'keybtn' + (activeKey === id ? ' rec' : '') + (failed.has(id) ? ' clash' : '');",
+    "    btn.textContent = activeKey === id ? 'Press keys...' : (val || 'Disabled') + (failed.has(id) ? ' (Clash)' : '');",
+    "    btn.onclick = () => { activeKey = (activeKey === id ? null : id); render(); };",
+    "    const clr = document.createElement('button'); clr.className = 'clr'; clr.textContent = 'Clear';",
+    "    clr.onclick = () => { state[id] = ''; activeKey = null; failed.delete(id); render(); };",
+    "    ctrl.appendChild(btn); ctrl.appendChild(clr);",
+    "    row.appendChild(lbl); row.appendChild(ctrl); list.appendChild(row);",
+    "  });",
+    "}",
+    "window.addEventListener('keydown', (e) => {",
+    "  if (!activeKey) return;",
+    "  e.preventDefault(); e.stopPropagation();",
+    "  const acc = keyToAccel(e);",
+    "  if (acc === 'CANCEL') { activeKey = null; render(); return; }",
+    "  if (acc) { state[activeKey] = acc; failed.delete(activeKey); activeKey = null; render(); }",
+    "});",
+    "document.getElementById('saveBtn').onclick = async () => {",
+    "  const res = await window.shortcutApi.save(state);",
+    "  state = res.shortcuts; failed = new Set(res.failed || []);",
+    "  document.getElementById('msg').textContent = failed.size ? 'Saved — red items clashed with another app.' : 'Shortcuts saved & active!';",
+    "  render();",
+    "};",
+    "document.getElementById('resetBtn').onclick = async () => {",
+    "  const res = await window.shortcutApi.reset();",
+    "  state = res.shortcuts; failed = new Set(res.failed || []);",
+    "  document.getElementById('msg').textContent = 'Reset to defaults.';",
+    "  render();",
+    "};",
+    "document.getElementById('closeBtn').onclick = () => window.shortcutApi.close();",
+    "window.shortcutApi.getData().then((d) => { state = d.shortcuts; labels = d.labels; failed = new Set(d.failed || []); render(); });",
+    "</script></body></html>",
+  ].join("\n");
+
+  fs.mkdirSync(path.dirname(SHORTCUT_PRELOAD_PATH), { recursive: true });
+  fs.writeFileSync(SHORTCUT_PRELOAD_PATH, preloadCode, "utf8");
+  fs.writeFileSync(SHORTCUT_HTML_PATH, editorHtml, "utf8");
+}
+
+function openShortcutEditor() {
+  if (shortcutWin && !shortcutWin.isDestroyed()) {
+    shortcutWin.show();
+    shortcutWin.focus();
+    return;
+  }
+
+  ensureShortcutEditorAssets();
+  globalShortcut.unregisterAll();
+  escRegistered = false;
+
+  const win = new BrowserWindow({
+    width: 520,
+    height: 520,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    alwaysOnTop: true,
+    title: "Cursor Companion — Customize Shortcuts",
+    backgroundColor: "#0b1020",
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: SHORTCUT_PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+    },
+  });
+
+  shortcutWin = win;
+  hardenWindow(win);
+
+  win.on("closed", () => {
+    if (shortcutWin === win) shortcutWin = null;
+    registerAllShortcuts();
+    rebuildTrayMenu();
+  });
+
+  win.loadFile(SHORTCUT_HTML_PATH);
+}
+
 async function captureDisplayNative(display) {
   const sf = display.scaleFactor || 1;
   const sources = await desktopCapturer.getSources({
@@ -1313,14 +1494,14 @@ async function captureDisplayNative(display) {
   return { image: match.thumbnail, sf };
 }
 
-async function captureAroundCursorBuffer(boxW = 1120, boxH = 760, fullScreen = false) {
+async function captureAroundCursorBuffer(boxW = 960, boxH = 680, fullScreen = false) {
   const pt = screen.getCursorScreenPoint();
   const disp = screen.getDisplayNearestPoint(pt);
   const { image, sf } = await captureDisplayNative(disp);
   const sz = image.getSize();
 
   if (fullScreen) {
-    return image.toJPEG(80);
+    return image.toJPEG(74);
   }
 
   const relX = pt.x - disp.bounds.x;
@@ -1342,7 +1523,7 @@ async function captureAroundCursorBuffer(boxW = 1120, boxH = 760, fullScreen = f
     Math.min(Math.round(relY * sf - cropH * 0.25), sz.height - cropH)
   );
 
-  return image.crop({ x: left, y: top, width: cropW, height: cropH }).toJPEG(82);
+  return image.crop({ x: left, y: top, width: cropW, height: cropH }).toJPEG(78);
 }
 
 async function captureBetweenPointsBuffer(p1, p2) {
@@ -1359,7 +1540,7 @@ async function captureBetweenPointsBuffer(p1, p2) {
   const rawH = Math.abs(relY2 - relY1);
 
   if (rawW < 20 || rawH < 20) {
-    return captureAroundCursorBuffer(1120, 760, false);
+    return captureAroundCursorBuffer(960, 680, false);
   }
 
   const pad = Math.round(28 * sf);
@@ -1369,29 +1550,10 @@ async function captureBetweenPointsBuffer(p1, p2) {
   const h = Math.min(sz.height - y, Math.round(rawH * sf + pad * 2));
 
   if (w < 10 || h < 10) {
-    return captureAroundCursorBuffer(1120, 760, false);
+    return captureAroundCursorBuffer(960, 680, false);
   }
 
-  return image.crop({ x, y, width: w, height: h }).toJPEG(84);
-}
-
-async function analyzeCapturedBuffer(jpegBuffer, actionMode = "solve") {
-  if (settings.localOcr) {
-    const ocrText = await runWindowsLocalOcr(jpegBuffer);
-    if (ocrText && ocrText.length >= 30) {
-      const textRes = await runAnalysisPipeline({
-        textContent: ocrText,
-        actionMode,
-      });
-      if (textRes && textRes.detected_type !== "ERROR" && !/unclear crop/i.test(String(textRes.cursor_pill || ""))) {
-        return textRes;
-      }
-    }
-  }
-  return runAnalysisPipeline({
-    imageBase64: jpegBuffer.toString("base64"),
-    actionMode,
-  });
+  return image.crop({ x, y, width: w, height: h }).toJPEG(80);
 }
 
 function grabSelectedTextDirectly() {
@@ -1400,32 +1562,53 @@ function grabSelectedTextDirectly() {
   }
 
   return new Promise((resolve) => {
-    const sentinel = `__CC_WAIT_${Date.now()}__`;
+    const sentinel = `__CC_WAIT_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
     const prev = clipboard.readText();
+    let settled = false;
+
     clipboard.writeText(sentinel);
 
-    const ps = `Start-Sleep -Milliseconds 110; (New-Object -ComObject WScript.Shell).SendKeys('^c')`;
-    execFile(
+    const ps = `
+Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace U;
+[U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
+[U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
+[U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
+Start-Sleep -Milliseconds 35;
+[U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
+[U.K]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero);
+Start-Sleep -Milliseconds 25;
+[U.K]::keybd_event(0x43, 0, 2, [UIntPtr]::Zero);
+[U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+`;
+
+    const child = execFile(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
       { windowsHide: true },
       () => {}
     );
 
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      try {
+        child.kill();
+      } catch (_) {}
+      clipboard.writeText(prev);
+      resolve(val);
+    };
+
     let checks = 0;
     const poll = setInterval(() => {
       checks++;
       const current = clipboard.readText();
       if (current && current !== sentinel) {
-        clearInterval(poll);
-        clipboard.writeText(prev);
-        resolve(current.trim());
-      } else if (checks >= 24) {
-        clearInterval(poll);
-        clipboard.writeText(prev);
-        resolve("");
+        finish(current.trim());
+      } else if (checks >= 46) {
+        finish("");
       }
-    }, 20);
+    }, 25);
   });
 }
 
@@ -1542,10 +1725,13 @@ async function handleInstantScan() {
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
-    const buf = await captureAroundCursorBuffer(1120, 760, false);
+    const buf = await captureAroundCursorBuffer(960, 680, false);
     if (activeRequestId !== reqId) return;
 
-    let res = await analyzeCapturedBuffer(buf, "solve");
+    let res = await runAnalysisPipeline({
+      imageBase64: buf.toString("base64"),
+      actionMode: "solve",
+    });
     if (activeRequestId !== reqId) return;
 
     if (res && /unclear crop/i.test(String(res.cursor_pill || ""))) {
@@ -1561,8 +1747,8 @@ async function handleInstantScan() {
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, "[Smart Screen Scan]");
   } catch (_) {
-    if (activeRequestId === reqId) {
-      showHud({ mode: "error", cursor_pill: "Retry F8 / Alt+A" }, 2400);
+    if (activeRequestId === reqId && !hudSuppressed) {
+      showHud({ mode: "error", cursor_pill: "Retry scan" }, 2400);
     }
   } finally {
     finishRequest(reqId);
@@ -1585,7 +1771,7 @@ async function handleTwoCornerSnip() {
       {
         mode: "result",
         detected_type: "DIRECT_VALUE",
-        cursor_pill: "⌜ Corner 1 set → press F9/Alt+Q at bottom-right",
+        cursor_pill: "⌜ Corner 1 set → press Snip at bottom-right",
         elapsed: "1/2",
       },
       6000
@@ -1603,14 +1789,17 @@ async function handleTwoCornerSnip() {
     const buf = await captureBetweenPointsBuffer(p1, pt);
     if (activeRequestId !== reqId) return;
 
-    const res = await analyzeCapturedBuffer(buf, "solve");
+    const res = await runAnalysisPipeline({
+      imageBase64: buf.toString("base64"),
+      actionMode: "solve",
+    });
     if (activeRequestId !== reqId) return;
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, "[2-Corner Snip]");
   } catch (_) {
-    if (activeRequestId === reqId) {
-      showHud({ mode: "error", cursor_pill: "Retry F9 / Alt+Q" }, 2400);
+    if (activeRequestId === reqId && !hudSuppressed) {
+      showHud({ mode: "error", cursor_pill: "Retry snip" }, 2400);
     }
   } finally {
     finishRequest(reqId);
@@ -1637,29 +1826,20 @@ async function handleTextAction(actionMode = "solve") {
         actionMode,
       });
     } else {
-      const buf = await captureAroundCursorBuffer(1120, 760, false);
+      const buf = await captureAroundCursorBuffer(960, 680, false);
       if (activeRequestId !== reqId) return;
-      sourceLabel = `[Highlighted ${actionMode} Scan]`;
-      res = await analyzeCapturedBuffer(buf, actionMode);
-      if (
-        activeRequestId === reqId &&
-        res &&
-        /unclear crop/i.test(String(res.cursor_pill || ""))
-      ) {
-        const fullBuf = await captureAroundCursorBuffer(1280, 860, true);
-        if (activeRequestId !== reqId) return;
-        res = await runAnalysisPipeline({
-          imageBase64: fullBuf.toString("base64"),
-          actionMode,
-        });
-      }
+      sourceLabel = `[Cursor ${actionMode} Scan]`;
+      res = await runAnalysisPipeline({
+        imageBase64: buf.toString("base64"),
+        actionMode,
+      });
     }
 
     if (activeRequestId !== reqId) return;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, sourceLabel);
   } catch (_) {
-    if (activeRequestId === reqId) {
+    if (activeRequestId === reqId && !hudSuppressed) {
       showHud({ mode: "error", cursor_pill: "Retry hotkey" }, 2400);
     }
   } finally {
@@ -1675,16 +1855,18 @@ function handleResult(res, elapsed, sourceContext) {
     res.detected_type === "ERROR" ||
     !res.cursor_pill
   ) {
-    showHud(
-      {
-        mode: "error",
-        cursor_pill:
-          (res && typeof res.cursor_pill === "string" && res.cursor_pill) ||
-          "High traffic — retry",
-        key_source: (res && res.key_source) || undefined,
-      },
-      3200
-    );
+    if (!hudSuppressed) {
+      showHud(
+        {
+          mode: "error",
+          cursor_pill:
+            (res && typeof res.cursor_pill === "string" && res.cursor_pill) ||
+            "High traffic — retry",
+          key_source: (res && res.key_source) || undefined,
+        },
+        3200
+      );
+    }
     return;
   }
 
@@ -1709,7 +1891,9 @@ function handleResult(res, elapsed, sourceContext) {
   if (history.length > 15) history.pop();
   historyIdx = 0;
 
-  showHud(item, 8500);
+  if (!hudSuppressed) {
+    showHud(item, 8500);
+  }
   syncSidecar();
 }
 
@@ -1743,8 +1927,8 @@ async function processSpotlightQuery(_event, query) {
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, query);
   } catch (_) {
-    if (activeRequestId === reqId) {
-      showHud({ mode: "error", cursor_pill: "Retry Alt+G" }, 2400);
+    if (activeRequestId === reqId && !hudSuppressed) {
+      showHud({ mode: "error", cursor_pill: "Retry Spotlight" }, 2400);
     }
   } finally {
     finishRequest(reqId);
@@ -1885,7 +2069,111 @@ ipcMain.on("hud-close-sidecar", () => {
   }
 });
 
-ipcMain.on("hud-hide", dismissAllOverlays);
+ipcMain.on("hud-hide", hideOverlaysOnly);
+
+ipcMain.handle("shortcuts-get", () => ({
+  shortcuts: settings.shortcuts,
+  labels: SHORTCUT_LABELS,
+  failed: Array.from(failedShortcuts),
+}));
+
+ipcMain.handle("shortcuts-save", (_event, nextMap) => {
+  saveSettings({ shortcuts: sanitizeShortcutsMap(nextMap) });
+  registerAllShortcuts();
+  const clashes = Array.from(failedShortcuts);
+  if (shortcutWin && !shortcutWin.isDestroyed()) {
+    globalShortcut.unregisterAll();
+    escRegistered = false;
+  }
+  rebuildTrayMenu();
+  return { ok: true, shortcuts: settings.shortcuts, failed: clashes };
+});
+
+ipcMain.handle("shortcuts-reset", () => {
+  saveSettings({ shortcuts: { ...DEFAULT_SHORTCUTS } });
+  registerAllShortcuts();
+  const clashes = Array.from(failedShortcuts);
+  if (shortcutWin && !shortcutWin.isDestroyed()) {
+    globalShortcut.unregisterAll();
+    escRegistered = false;
+  }
+  rebuildTrayMenu();
+  return { ok: true, shortcuts: settings.shortcuts, failed: clashes };
+});
+
+ipcMain.on("shortcuts-close", () => {
+  if (shortcutWin && !shortcutWin.isDestroyed()) {
+    shortcutWin.close();
+  }
+});
+
+function getActionHandlers() {
+  return {
+    smartScan: handleInstantScan,
+    smartScanAlt: handleInstantScan,
+    twoCornerSnip: handleTwoCornerSnip,
+    twoCornerSnipAlt: handleTwoCornerSnip,
+    solveText: () => handleTextAction("solve"),
+    rewriteText: () => handleTextAction("rewrite"),
+    explainText: () => handleTextAction("explain"),
+    ghostPaste: ghostPasteActiveValue,
+    spotlight: () => openSpotlight("ask"),
+    followup: () => openSpotlight("followup"),
+    apiKey: () => openSpotlight("key"),
+    sidecar: toggleSidecar,
+    pinHud: () => {
+      isPinned = !isPinned;
+      clearTimeout(hideTimer);
+      if (history[historyIdx]) {
+        showHud(history[historyIdx], 0);
+      } else if (!isPinned && hudWin && !hudWin.isDestroyed()) {
+        if (hudWin.isVisible()) startCursorFollow();
+      }
+    },
+    cycleHistory: () => {
+      if (!history.length) return;
+      historyIdx = (historyIdx + 1) % history.length;
+      showHud(history[historyIdx], 0);
+      syncSidecar();
+    },
+    hideOnly: hideOverlaysOnly,
+    forceReset: forceResetAll,
+  };
+}
+
+function registerAllShortcuts() {
+  globalShortcut.unregisterAll();
+  escRegistered = false;
+  failedShortcuts.clear();
+
+  const handlers = getActionHandlers();
+  const seenAccels = new Set();
+
+  for (const [id, handler] of Object.entries(handlers)) {
+    const accel = String(settings.shortcuts[id] || "").trim();
+    if (!accel) continue;
+    const norm = accel.toLowerCase();
+    if (seenAccels.has(norm)) {
+      failedShortcuts.add(id);
+      continue;
+    }
+    try {
+      const ok = globalShortcut.register(accel, handler);
+      if (ok) {
+        seenAccels.add(norm);
+      } else {
+        failedShortcuts.add(id);
+      }
+    } catch (_) {
+      failedShortcuts.add(id);
+    }
+  }
+  syncEscapeShortcut();
+}
+
+function fmtKey(id) {
+  return settings.shortcuts[id] || "Off";
+}
 
 function rebuildTrayMenu() {
   if (!tray) return;
@@ -1933,35 +2221,26 @@ function rebuildTrayMenu() {
 
   template.push(
     { type: "separator" },
-    { label: "Smart Scan (F8 / Alt + A)", click: () => handleInstantScan() },
-    { label: "2-Corner Snip (F9 / Alt + Q)", click: () => handleTwoCornerSnip() },
-    { label: "Solve Selection (Alt + C)", click: () => handleTextAction("solve") },
-    { label: "Rewrite Selection (Alt + W)", click: () => handleTextAction("rewrite") },
-    { label: "Explain Selection (Alt + E)", click: () => handleTextAction("explain") },
+    { label: `Smart Scan (${fmtKey("smartScan")} / ${fmtKey("smartScanAlt")})`, click: () => handleInstantScan() },
+    { label: `2-Corner Snip (${fmtKey("twoCornerSnip")} / ${fmtKey("twoCornerSnipAlt")})`, click: () => handleTwoCornerSnip() },
+    { label: `Solve Selection (${fmtKey("solveText")})`, click: () => handleTextAction("solve") },
+    { label: `Rewrite Selection (${fmtKey("rewriteText")})`, click: () => handleTextAction("rewrite") },
+    { label: `Explain Selection (${fmtKey("explainText")})`, click: () => handleTextAction("explain") },
     { type: "separator" },
     { label: "Mode Packs", submenu: packSubmenu },
     {
-      label: "Turbo Local OCR (OFF = Exam Stealth)",
-      type: "checkbox",
-      checked: Boolean(settings.localOcr),
-      click: (menuItem) => {
-        saveSettings({ localOcr: Boolean(menuItem.checked) });
-        showHud(
-          {
-            mode: "result",
-            detected_type: "DIRECT_VALUE",
-            cursor_pill: menuItem.checked ? "Turbo OCR ON ⚡" : "Exam Stealth Mode ✓",
-            elapsed: "✓",
-          },
-          2000
-        );
-      },
+      label:
+        failedShortcuts.size > 0
+          ? `⚠ Customize Shortcuts (${failedShortcuts.size} clash)...`
+          : "Customize Shortcuts...",
+      click: () => openShortcutEditor(),
     },
     { type: "separator" },
-    { label: "Spotlight Bar (Alt + G)", click: () => openSpotlight("ask") },
-    { label: "Study Sidecar (Alt + D)", click: () => toggleSidecar() },
-    { label: "Personal Key / Share Pro (Alt + K)", click: () => openSpotlight("key") },
-    { label: "Cancel / Reset (F10 / Alt + X)", click: () => dismissAllOverlays() },
+    { label: `Spotlight Bar (${fmtKey("spotlight")})`, click: () => openSpotlight("ask") },
+    { label: `Study Sidecar (${fmtKey("sidecar")})`, click: () => toggleSidecar() },
+    { label: `Personal Key / Share Pro (${fmtKey("apiKey")})`, click: () => openSpotlight("key") },
+    { label: `Vanish Overlay (${fmtKey("hideOnly")})`, click: () => hideOverlaysOnly() },
+    { label: `Force Cancel / Reset (${fmtKey("forceReset")})`, click: () => forceResetAll() },
     { type: "separator" },
     { label: "Quit", click: () => app.quit() }
   );
@@ -1974,17 +2253,6 @@ function createTray() {
   tray = new Tray(icon);
   tray.setToolTip("Cursor Companion V3.1");
   rebuildTrayMenu();
-}
-
-function registerShortcut(accelerator, handler) {
-  try {
-    const registered = globalShortcut.register(accelerator, handler);
-    if (!registered) {
-      console.warn(`Shortcut unavailable: ${accelerator}`);
-    }
-  } catch (error) {
-    console.error(`Unable to register ${accelerator}:`, error.message);
-  }
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -2001,48 +2269,11 @@ if (!gotSingleInstanceLock) {
       saveSettings({});
 
       createHudWindow();
+      registerAllShortcuts();
       createTray();
       syncRemoteConfig();
 
       keepAliveTimer = setInterval(warmBackend, 240000);
-
-      // Zero-modifier proctor-safe aliases
-      registerShortcut("F8", handleInstantScan);
-      registerShortcut("F9", handleTwoCornerSnip);
-      registerShortcut("F10", dismissAllOverlays);
-
-      // Standard hotkeys
-      registerShortcut("Alt+A", handleInstantScan);
-      registerShortcut("Alt+Q", handleTwoCornerSnip);
-      registerShortcut("Alt+C", () => handleTextAction("solve"));
-      registerShortcut("Alt+W", () => handleTextAction("rewrite"));
-      registerShortcut("Alt+E", () => handleTextAction("explain"));
-
-      registerShortcut("Alt+Enter", ghostPasteActiveValue);
-      registerShortcut("Alt+G", () => openSpotlight("ask"));
-      registerShortcut("Alt+F", () => openSpotlight("followup"));
-      registerShortcut("Alt+K", () => openSpotlight("key"));
-      registerShortcut("Alt+D", toggleSidecar);
-
-      registerShortcut("Alt+P", () => {
-        isPinned = !isPinned;
-        clearTimeout(hideTimer);
-
-        if (history[historyIdx]) {
-          showHud(history[historyIdx], 0);
-        } else if (!isPinned && hudWin && !hudWin.isDestroyed()) {
-          if (hudWin.isVisible()) startCursorFollow();
-        }
-      });
-
-      registerShortcut("Alt+H", () => {
-        if (!history.length) return;
-        historyIdx = (historyIdx + 1) % history.length;
-        showHud(history[historyIdx], 0);
-        syncSidecar();
-      });
-
-      registerShortcut("Alt+X", dismissAllOverlays);
     })
     .catch((error) => {
       console.error("Application startup failed:", error);

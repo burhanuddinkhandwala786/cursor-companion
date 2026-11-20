@@ -62,9 +62,9 @@
       padding: 6px 14px; border-radius: 999px; margin-bottom: 20px;
     }
     h1 {
-      font-size: clamp(2.1rem, 5vw, 3.4rem);
-      line-height: 1.12; letter-spacing: -0.03em; font-weight: 800;
-      max-width: 800px; margin: 0 auto 16px;
+      font-size: clamp(2rem, 4.2vw, 3.05rem);
+      line-height: 1.15; letter-spacing: -0.03em; font-weight: 800;
+      max-width: 920px; margin: 0 auto 16px;
     }
     .grad {
       background: linear-gradient(90deg, #a5b4fc, #22d3ee);
@@ -391,23 +391,34 @@
     document.getElementById("copyUpiBtn").onclick = () =>
       copyWithFeedback(SITE_CONFIG.upiId, "copyUpiBtn", "Copy UPI ID");
 
-    (async function checkEngine() {
+    (function checkEngine(attempt = 0) {
       const badge = document.getElementById("statusBadge");
       const dot = document.getElementById("statusDot");
       const text = document.getElementById("statusText");
-      try {
-        const res = await fetch("https://study-buddy-brain.onrender.com/healthz", { cache: "no-store" });
-        const data = await res.json();
-        if (data && data.status === "ok") {
-          text.textContent = `Engine ${data.engine || "Live"} • Online`;
-          return;
-        }
-      } catch (_) {}
-      dot.style.background = "#f59e0b";
-      badge.style.color = "#fde68a";
-      badge.style.background = "rgba(245, 158, 11, 0.14)";
-      badge.style.borderColor = "rgba(245, 158, 11, 0.35)";
-      text.textContent = "Cloud Waking Up...";
+
+      fetch("https://study-buddy-brain.onrender.com/healthz", { cache: "no-store" })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data && data.status === "ok") {
+            dot.style.background = "#10b981";
+            badge.style.color = "#6ee7b7";
+            badge.style.background = "rgba(16, 185, 129, 0.12)";
+            badge.style.borderColor = "rgba(16, 185, 129, 0.3)";
+            text.textContent = `Engine ${data.engine || "Live"} • Online`;
+            return;
+          }
+          throw new Error("Not ready");
+        })
+        .catch(() => {
+          dot.style.background = "#f59e0b";
+          badge.style.color = "#fde68a";
+          badge.style.background = "rgba(245, 158, 11, 0.14)";
+          badge.style.borderColor = "rgba(245, 158, 11, 0.35)";
+          text.textContent = "Cloud Waking Up...";
+          if (attempt < 8) {
+            setTimeout(() => checkEngine(attempt + 1), 6000);
+          }
+        });
     })();
   </script>
 </body>

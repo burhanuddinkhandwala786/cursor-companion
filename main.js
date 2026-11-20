@@ -1402,22 +1402,9 @@ function grabSelectedTextDirectly() {
   return new Promise((resolve) => {
     const sentinel = `__CC_WAIT_${Date.now()}__`;
     const prev = clipboard.readText();
-
     clipboard.writeText(sentinel);
 
-    const ps = `
-Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace U;
-[U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 30;
-[U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 20;
-[U.K]::keybd_event(0x43, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
-`;
-
+    const ps = `Start-Sleep -Milliseconds 110; (New-Object -ComObject WScript.Shell).SendKeys('^c')`;
     execFile(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
@@ -1426,16 +1413,14 @@ Start-Sleep -Milliseconds 20;
     );
 
     let checks = 0;
-
     const poll = setInterval(() => {
       checks++;
       const current = clipboard.readText();
-
       if (current && current !== sentinel) {
         clearInterval(poll);
         clipboard.writeText(prev);
         resolve(current.trim());
-      } else if (checks >= 10) {
+      } else if (checks >= 24) {
         clearInterval(poll);
         clipboard.writeText(prev);
         resolve("");

@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cursor Companion v3.1 — Zero-Focus AI Desktop HUD</title>
+  <meta name="description" content="Sub-2-second, capture-invisible AI overlay for Windows. Zero focus theft, 5-provider failover, and 100% free with your own API key." />
+  <style>
+    :root {
+      --bg: #07090f;
+      --surface: #0e1320;
+      --surface-2: #141b2d;
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #eef2ff;
+      --muted: #94a3b8;
+      --accent: #6366f1;
+      --accent-2: #22d3ee;
+      --green: #10b981;
+      --amber: #f59e0b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      background: radial-gradient(circle at 15% 10%, rgba(99, 102, 241, 0.16), transparent 40%),
+                  radial-gradient(circle at 85% 20%, rgba(34, 211, 238, 0.12), transparent 35%),
+                  var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    a { color: inherit; text-decoration: none; }
+    .container { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+    /* Nav */
+    nav {
+      position: sticky; top: 0; z-index: 50;
+      backdrop-filter: blur(14px);
+      background: rgba(7, 9, 15, 0.78);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      display: flex; align-items: center; justify-content: space-between;
+      height: 64px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -0.02em; }
+    .brand-dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      box-shadow: 0 0 12px var(--accent-2);
+    }
+    .nav-links { display: flex; gap: 22px; font-size: 0.92rem; color: var(--muted); }
+    .nav-links a:hover { color: var(--text); }
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 7px;
+      font-size: 0.78rem; padding: 5px 11px; border-radius: 999px;
+      background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3);
+      color: #6ee7b7;
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+
+    /* Hero */
+    .hero { padding: 84px 0 64px; text-align: center; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 0.82rem; color: #c7d2fe;
+      background: rgba(99, 102, 241, 0.14); border: 1px solid rgba(99, 102, 241, 0.35);
+      padding: 6px 14px; border-radius: 999px; margin-bottom: 22px;
+    }
+    h1 {
+      font-size: clamp(2.2rem, 5vw, 3.6rem);
+      line-height: 1.1; letter-spacing: -0.03em; font-weight: 800;
+      max-width: 820px; margin: 0 auto 18px;
+    }
+    .grad {
+      background: linear-gradient(90deg, #a5b4fc, #22d3ee);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      max-width: 650px; margin: 0 auto 32px;
+      color: var(--muted); font-size: 1.08rem;
+    }
+    .cta-row { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; margin-bottom: 18px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 13px 24px; border-radius: 12px; font-weight: 600; font-size: 0.96rem;
+      transition: transform 0.15s ease, box-shadow 0.15s ease;
+      cursor: pointer; border: 1px solid transparent;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), #4f46e5);
+      color: #fff; box-shadow: 0 8px 28px rgba(99, 102, 241, 0.35);
+    }
+    .btn-secondary {
+      background: var(--surface-2); border-color: var(--border); color: var(--text);
+    }
+    .sub-note { font-size: 0.82rem; color: var(--muted); }
+
+    /* Mock HUD preview */
+    .hud-demo {
+      margin: 42px auto 0; max-width: 720px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 18px; padding: 26px; text-align: left;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+    }
+    .hud-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 0.82rem; color: var(--muted); }
+    .hud-q { font-size: 0.96rem; color: #cbd5e1; margin-bottom: 18px; }
+    .hud-pill {
+      display: inline-flex; align-items: center; gap: 10px;
+      background: rgba(15, 23, 42, 0.96); border: 1px solid rgba(34, 211, 238, 0.45);
+      border-radius: 999px; padding: 8px 16px; font-size: 0.9rem; font-weight: 600;
+      box-shadow: 0 0 24px rgba(34, 211, 238, 0.18);
+    }
+    .hud-tag { font-size: 0.72rem; color: #6ee7b7; background: rgba(16, 185, 129, 0.15); padding: 2px 8px; border-radius: 999px; }
+
+    /* Sections */
+    section { padding: 64px 0; border-top: 1px solid var(--border); }
+    h2 { font-size: 1.9rem; letter-spacing: -0.02em; margin-bottom: 10px; }
+    .sec-sub { color: var(--muted); margin-bottom: 34px; max-width: 640px; }
+
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 16px; padding: 22px;
+    }
+    .card h3 { font-size: 1.05rem; margin-bottom: 8px; }
+    .card p { font-size: 0.92rem; color: var(--muted); }
+
+    /* Hotkeys */
+    .hk-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 12px; }
+    .hk-item {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 14px 16px;
+    }
+    kbd {
+      background: #1e293b; border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 7px; padding: 4px 9px; font-size: 0.82rem; font-weight: 700;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #e2e8f0;
+      white-space: nowrap;
+    }
+
+    /* Setup Steps */
+    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+    .step-num {
+      display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center;
+      border-radius: 8px; background: rgba(99, 102, 241, 0.2); color: #a5b4fc;
+      font-weight: 700; font-size: 0.85rem; margin-bottom: 10px;
+    }
+    .key-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .mini-link {
+      font-size: 0.84rem; padding: 7px 12px; border-radius: 8px;
+      background: var(--surface-2); border: 1px solid var(--border); color: #bae6fd;
+    }
+    .mini-link:hover { border-color: var(--accent-2); }
+
+    /* Pricing */
+    .price-card { position: relative; display: flex; flex-direction: column; justify-content: space-between; }
+    .price-card.featured { border-color: rgba(99, 102, 241, 0.6); background: linear-gradient(180deg, rgba(99,102,241,0.10), var(--surface)); }
+    .price { font-size: 2rem; font-weight: 800; margin: 10px 0 6px; }
+    .price span { font-size: 0.9rem; font-weight: 500; color: var(--muted); }
+    .feat-list { list-style: none; margin: 16px 0 22px; font-size: 0.9rem; color: #cbd5e1; }
+    .feat-list li { margin-bottom: 8px; }
+    .feat-list li::before { content: "✓ "; color: var(--green); font-weight: 700; }
+
+    /* Trust Box */
+    .trust-box {
+      background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.28);
+      border-radius: 14px; padding: 18px 20px; font-size: 0.9rem; color: #fde68a;
+    }
+    .trust-box strong { color: #fffbeb; }
+
+    footer {
+      border-top: 1px solid var(--border); padding: 36px 0;
+      text-align: center; color: var(--muted); font-size: 0.86rem;
+    }
+    @media (max-width: 700px) { .nav-links { display: none; } }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="container nav-inner">
+      <div class="brand"><span class="brand-dot"></span> Cursor Companion</div>
+      <div class="nav-links">
+        <a href="#features">Features</a>
+        <a href="#hotkeys">Hotkeys</a>
+        <a href="#byok">Free Unlimited Setup</a>
+        <a href="#pricing">Passes</a>
+      </div>
+      <div class="status-pill" id="statusBadge">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Checking Engine...</span>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container">
+    <section class="hero" style="border-top:none;">
+      <div class="badge">v3.1.0 Live • Windows 10/11 • Native Capture Protection</div>
+      <h1>Instant Answers at Your Cursor.<br /><span class="grad">Zero Focus Loss. Zero Subscriptions.</span></h1>
+      <p>
+        A lightweight Windows AI HUD that stays invisible to screen capture, answers screen questions in ~1.5 seconds via 5-provider failover, and runs 100% free forever with your own API key.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest" target="_blank" rel="noopener">
+          ⬇ Download for Windows (v3.1.0)
+        </a>
+        <a class="btn btn-secondary" href="#byok">⚡ Unlock Unlimited Free (30s)</a>
+      </div>
+      <div class="sub-note">Includes 10 free instant trial scans/day out of the box • DPAPI-encrypted local keys • Open-source client</div>
+
+      <div class="hud-demo">
+        <div class="hud-top">
+          <span>Active Window — Focus Untouched</span>
+          <span>Pressed <kbd>F8</kbd></span>
+        </div>
+        <div class="hud-q">
+          Q. Which of the following is NOT a property of a B+ Tree compared to a standard B-Tree?<br />
+          A. All records are stored at leaf nodes  |  B. Leaf nodes are linked sequentially  |  C. Internal nodes store full data pointers
+        </div>
+        <div class="hud-pill">
+          <span>C. Internal nodes store full data pointers</span>
+          <span class="hud-tag">1.4s • BYOK</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="features">
+      <h2>Engineered for Speed, Privacy & Stability</h2>
+      <p class="sec-sub">Built to replace bloated $20–$60/mo desktop AI overlays that steal focus, lag, and lock you into monthly plans.</p>
+      <div class="grid-3">
+        <div class="card">
+          <h3>Zero-Focus 2-Corner Snip (F9)</h3>
+          <p>Tap F9 at top-left and F9 at bottom-right. No clickable screenshot window, no window blur events, and zero interruptions.</p>
+        </div>
+        <div class="card">
+          <h3>Verification-First Accuracy</h3>
+          <p>Forces internal step-by-step verification for NOT/EXCEPT traps and compound choices ("Both B and C") before showing the final pill.</p>
+        </div>
+        <div class="card">
+          <h3>5-Provider Auto-Failover</h3>
+          <p>Hedged cloud cascade across Groq, NVIDIA NIM, Cloudflare Workers AI, Google Gemini, and OpenRouter with persistent Redis caching.</p>
+        </div>
+        <div class="card">
+          <h3>Hardware-Encrypted Keys</h3>
+          <p>Personal API keys entered in Alt + K are encrypted with Windows DPAPI (safeStorage) and sent straight from your PC to the AI provider.</p>
+        </div>
+        <div class="card">
+          <h3>Modular Mode Packs</h3>
+          <p>Switch instantly from the tray between Exam Solver, Coding & DSA Interview, and Excel Formula packs — or add custom JSON packs.</p>
+        </div>
+        <div class="card">
+          <h3>Native Capture Invisibility</h3>
+          <p>Uses native Windows content protection (WDA_EXCLUDEFROMCAPTURE) with zero background process clutter and a 27s crash-proof watchdog.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="hotkeys">
+      <h2>Master the 6 Essential Hotkeys</h2>
+      <p class="sec-sub">Runs quietly in your Windows System Tray. Works over browsers, PDFs, IDEs, and spreadsheets.</p>
+      <div class="hk-grid">
+        <div class="hk-item"><span>Smart Cursor Scan (Auto-Widens)</span><kbd>F8 / Alt + A</kbd></div>
+        <div class="hk-item"><span>Zero-Focus 2-Corner Snip</span><kbd>F9 / Alt + Q</kbd></div>
+        <div class="hk-item"><span>Instant Hide / Force Reset</span><kbd>F10 / Alt + X</kbd></div>
+        <div class="hk-item"><span>Solve Highlighted Text</span><kbd>Alt + C</kbd></div>
+        <div class="hk-item"><span>Rewrite / Explain Text</span><kbd>Alt + W / E</kbd></div>
+        <div class="hk-item"><span>Open Study Sidecar History</span><kbd>Alt + D</kbd></div>
+        <div class="hk-item"><span>Spotlight Ask / Follow-Up</span><kbd>Alt + G / F</kbd></div>
+        <div class="hk-item"><span>Personal API Key / Pro Share</span><kbd>Alt + K</kbd></div>
+      </div>
+    </section>
+
+    <section id="byok">
+      <h2>Unlock Unlimited Free Speed in 30 Seconds (BYOK)</h2>
+      <p class="sec-sub">New installs get 10 free shared-pool scans/day immediately. Add your own free Groq or Google AI Studio key for unlimited, private, unthrottled usage forever.</p>
+      <div class="steps">
+        <div class="card">
+          <div class="step-num">1</div>
+          <h3>Grab a Free API Key (₹0)</h3>
+          <p>No credit card needed. Groq gives 1,000 free requests/day; Google AI Studio gives recurring daily Gemini quota.</p>
+          <div class="key-links">
+            <a class="mini-link" href="https://console.groq.com/keys" target="_blank" rel="noopener">Get Free Groq Key ↗</a>
+            <a class="mini-link" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Get Free Gemini Key ↗</a>
+          </div>
+        </div>
+        <div class="card">
+          <div class="step-num">2</div>
+          <h3>Press Alt + K & Paste</h3>
+          <p>Paste one key (or two comma-separated keys like <code>gsk_..., AIza...</code> for instant personal failover) and hit Enter.</p>
+        </div>
+        <div class="card">
+          <div class="step-num">3</div>
+          <h3>Done — Unlimited Forever</h3>
+          <p>Your PC talks directly to the AI provider with zero middleman wait. Prefer community priority? Type <code>share:YOUR_KEY</code> to unlock 150/day Pro Pool.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="pricing">
+      <h2>Simple, Honest Access</h2>
+      <p class="sec-sub">Zero forced subscriptions. Use your own free key forever, or grab a hassle-free pass when you need zero setup.</p>
+      <div class="grid-3">
+        <div class="card price-card">
+          <div>
+            <h3>Free BYOK</h3>
+            <div class="price">₹0 <span>/ forever</span></div>
+            <ul class="feat-list">
+              <li>10 free trial cloud scans/day</li>
+              <li>Unlimited scans with your own free key</li>
+              <li>All Mode Packs (Exam, DSA, Excel)</li>
+              <li>Windows DPAPI local key encryption</li>
+            </ul>
+          </div>
+          <a class="btn btn-secondary" style="justify-content:center;" href="https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest" target="_blank" rel="noopener">Download Free</a>
+        </div>
+
+        <div class="card price-card featured">
+          <div>
+            <h3>7-Day Sprint Pass</h3>
+            <div class="price">₹49 <span>/ 7 days</span></div>
+            <ul class="feat-list">
+              <li>Zero API key setup — instant managed key</li>
+              <li>500 high-speed verified scans</li>
+              <li>Multi-model automatic failover</li>
+              <li>Ideal for exam or interview week</li>
+            </ul>
+          </div>
+          <!-- Replace href below with your Razorpay Payment Page or WhatsApp/Telegram link -->
+          <a class="btn btn-primary" style="justify-content:center;" href="mailto:rajasthanuniversal1993@gmail.com?subject=Cursor%20Companion%207-Day%20Sprint%20Pass%20(Rs.49)">Get Sprint Pass</a>
+        </div>
+
+        <div class="card price-card">
+          <div>
+            <h3>Pro Monthly</h3>
+            <div class="price">₹149 <span>/ month</span></div>
+            <ul class="feat-list">
+              <li>Zero API key setup — managed private key</li>
+              <li>2,500 verified text & vision scans/mo</li>
+              <li>Priority hedged routing & early updates</li>
+              <li>Custom Mode Pack request support</li>
+            </ul>
+          </div>
+          <a class="btn btn-secondary" style="justify-content:center;" href="mailto:rajasthanuniversal1993@gmail.com?subject=Cursor%20Companion%20Pro%20Monthly%20Pass">Get Pro Monthly</a>
+        </div>
+      </div>
+    </section>
+
+    <section style="padding-top: 32px; border-top: none;">
+      <div class="trust-box">
+        <strong>Windows SmartScreen Note:</strong> Cursor Companion is an independent, open-source Windows app and does not use a $400/yr code-signing certificate yet. If Windows shows "Windows protected your PC", click <strong>More info → Run anyway</strong>, or inspect the complete source code and SHA-256 hash directly on <a href="https://github.com/burhanuddinkhandwala786/cursor-companion" target="_blank" rel="noopener" style="text-decoration:underline;">GitHub</a>.
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      Built with precision by Burhanuddin Khandwala •
+      <a href="https://github.com/burhanuddinkhandwala786/cursor-companion" target="_blank" rel="noopener" style="text-decoration:underline;">GitHub Repository</a> •
+      <a href="https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest" target="_blank" rel="noopener" style="text-decoration:underline;">Latest Release</a>
+    </div>
+  </footer>
+
+  <script>
+    (async function checkEngine() {
+      const badge = document.getElementById("statusBadge");
+      const dot = document.getElementById("statusDot");
+      const text = document.getElementById("statusText");
+      try {
+        const res = await fetch("https://study-buddy-brain.onrender.com/healthz", { cache: "no-store" });
+        const data = await res.json();
+        if (data && data.status === "ok") {
+          text.textContent = `Engine ${data.engine || "Live"} • Online`;
+          return;
+        }
+      } catch (_) {}
+      dot.style.background = "#f59e0b";
+      badge.style.color = "#fde68a";
+      badge.style.background = "rgba(245, 158, 11, 0.14)";
+      badge.style.borderColor = "rgba(245, 158, 11, 0.35)";
+      text.textContent = "Cloud Waking Up...";
+    })();
+  </script>
+</body>
+</html>

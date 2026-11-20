@@ -131,6 +131,43 @@
     }
     .trust-box strong { color: #fffbeb; }
 
+    /* UPI QR Support Modal */
+    .modal-backdrop {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(2, 6, 23, 0.82); backdrop-filter: blur(8px);
+      display: none; align-items: center; justify-content: center; padding: 20px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-box {
+      width: 100%; max-width: 380px; text-align: center;
+      background: #0f172a; border: 1px solid rgba(99, 102, 241, 0.45);
+      border-radius: 20px; padding: 26px 22px; position: relative;
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.65);
+    }
+    .modal-close {
+      position: absolute; top: 14px; right: 16px;
+      background: none; border: none; color: var(--muted);
+      font-size: 1.4rem; cursor: pointer;
+    }
+    .modal-close:hover { color: #fff; }
+    .qr-wrap {
+      background: #ffffff; border-radius: 14px; padding: 12px;
+      width: 220px; height: 220px; margin: 16px auto;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .qr-wrap img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+    .upi-box {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: #1e293b; border: 1px solid var(--border);
+      border-radius: 10px; padding: 10px 12px; margin-top: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.86rem;
+    }
+    .copy-btn {
+      background: var(--accent); color: #fff; border: none;
+      border-radius: 7px; padding: 6px 12px; font-size: 0.8rem;
+      font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+
     footer {
       border-top: 1px solid var(--border); padding: 34px 0;
       text-align: center; color: var(--muted); font-size: 0.86rem;
@@ -146,7 +183,7 @@
         <a href="#features">Features</a>
         <a href="#hotkeys">Hotkeys</a>
         <a href="#free-setup">Unlimited Free Key</a>
-        <a href="#community">Feedback &amp; Support</a>
+        <a href="#community">Feedback & Support</a>
       </div>
       <div class="status-pill" id="statusBadge">
         <span class="status-dot" id="statusDot"></span>
@@ -172,7 +209,7 @@
     </section>
 
     <section id="features">
-      <h2>Why Students &amp; Developers Use It</h2>
+      <h2>Why Students & Developers Use It</h2>
       <p class="sec-sub">Zero paywalls, zero bloat, and built to keep working automatically even when AI providers change models.</p>
       <div class="grid-3">
         <div class="card">
@@ -198,7 +235,7 @@
         <div class="hk-item"><span>Zero-Focus 2-Corner Snip</span><kbd>F9 / Alt + Q</kbd></div>
         <div class="hk-item"><span>Solve Highlighted Text</span><kbd>Alt + C</kbd></div>
         <div class="hk-item"><span>Vanish Overlay (No Reset)</span><kbd>Alt + X / Esc</kbd></div>
-        <div class="hk-item"><span>Force Cancel &amp; Reset</span><kbd>F10</kbd></div>
+        <div class="hk-item"><span>Force Cancel & Reset</span><kbd>F10</kbd></div>
         <div class="hk-item"><span>Study Sidecar History</span><kbd>Alt + D</kbd></div>
         <div class="hk-item"><span>Spotlight Ask / Follow-Up</span><kbd>Alt + G / F</kbd></div>
         <div class="hk-item"><span>Personal Key / Share Pro</span><kbd>Alt + K</kbd></div>
@@ -220,7 +257,7 @@
         </div>
         <div class="card">
           <div class="step-num">2</div>
-          <h3>Press Alt + K &amp; Paste</h3>
+          <h3>Press Alt + K & Paste</h3>
           <p>Paste your key (or both comma-separated: <code>gsk_..., AIza...</code> for instant personal failover) and hit Enter.</p>
         </div>
         <div class="card">
@@ -232,7 +269,7 @@
     </section>
 
     <section id="community">
-      <h2>Feedback &amp; Voluntary Support</h2>
+      <h2>Feedback & Voluntary Support</h2>
       <p class="sec-sub">This app is 100% free right now. Your bug reports, feature requests, and optional support keep it alive and improving.</p>
       <div class="grid-2">
         <div class="card">
@@ -246,8 +283,8 @@
 
         <div class="support-card">
           <h3>Buy Me a Chai (100% Optional)</h3>
-          <p style="margin-bottom:18px;">Cursor Companion is free for all students. If it saved you time during exams or coding, you can chip in any small amount via UPI/Razorpay to help keep cloud hosting running.</p>
-          <a class="btn btn-primary" id="razorpayBtn" href="#" target="_blank" rel="noopener">☕ Support via Razorpay / UPI</a>
+          <p style="margin-bottom:18px;">Cursor Companion is free for all students. If it saved you time during exams or coding, you can scan the UPI QR to chip in any small amount (₹20–₹50) toward server upkeep.</p>
+          <button class="btn btn-primary" id="openUpiBtn" type="button">☕ Support via UPI QR</button>
         </div>
       </div>
     </section>
@@ -258,6 +295,23 @@
       </div>
     </section>
   </main>
+
+  <!-- UPI Support Modal -->
+  <div class="modal-backdrop" id="upiModal" aria-hidden="true">
+    <div class="modal-box">
+      <button class="modal-close" id="closeUpiBtn" type="button" aria-label="Close">×</button>
+      <h3 style="font-size:1.2rem;margin-bottom:4px;">Support Cursor Companion ☕</h3>
+      <p style="font-size:0.86rem;color:var(--muted);">Scan with GPay, PhonePe, Paytm, or BHIM</p>
+      <div class="qr-wrap" id="qrWrap">
+        <img id="upiQrImg" src="upi-qr.png" alt="UPI QR Code" onerror="document.getElementById('qrWrap').style.display='none'" />
+      </div>
+      <div class="upi-box">
+        <span id="upiIdText" style="overflow:hidden;text-overflow:ellipsis;">yourname@okaxis</span>
+        <button class="copy-btn" id="copyUpiBtn" type="button">Copy UPI ID</button>
+      </div>
+      <p style="font-size:0.78rem;color:var(--muted);margin-top:12px;">100% voluntary • Goes directly toward API & hosting upkeep</p>
+    </div>
+  </div>
 
   <footer>
     <div class="container">
@@ -272,24 +326,29 @@
     // EDIT ONLY THESE 3 LINES BEFORE COMMITTING docs/index.html
     // ============================================================
     const SITE_CONFIG = {
-      developerEmail: "REPLACE_WITH_YOUR_PERSONAL_GMAIL@gmail.com",
-      razorpaySupportUrl: "REPLACE_WITH_YOUR_RAZORPAY_PAYMENT_PAGE_URL", // e.g. https://rzp.io/l/your-link
-      feedbackUrl: "https://github.com/burhanuddinkhandwala786/cursor-companion/issues/new", // or your Google Form link
+      developerEmail: "burhanuddinkhandwala110@gmail.com",
+      upiId: "burhanuddinkhandwala786@okaxis", // Use a non-phone-number UPI alias for privacy
+      feedbackUrl: "https://github.com/burhanuddinkhandwala786/cursor-companion/issues/new", // or a Google Form URL
     };
 
     document.getElementById("feedbackBtn").href = SITE_CONFIG.feedbackUrl;
     document.getElementById("emailBtn").href =
       "mailto:" + SITE_CONFIG.developerEmail + "?subject=Cursor%20Companion%20Feedback";
+    document.getElementById("upiIdText").textContent = SITE_CONFIG.upiId;
 
-    const rzpBtn = document.getElementById("razorpayBtn");
-    if (SITE_CONFIG.razorpaySupportUrl.startsWith("http")) {
-      rzpBtn.href = SITE_CONFIG.razorpaySupportUrl;
-    } else {
-      rzpBtn.textContent = "☕ Support Link Coming Soon";
-      rzpBtn.style.opacity = "0.7";
-      rzpBtn.removeAttribute("target");
-      rzpBtn.href = "#community";
-    }
+    const modal = document.getElementById("upiModal");
+    document.getElementById("openUpiBtn").onclick = () => modal.classList.add("open");
+    document.getElementById("closeUpiBtn").onclick = () => modal.classList.remove("open");
+    modal.onclick = (e) => { if (e.target === modal) modal.classList.remove("open"); };
+
+    document.getElementById("copyUpiBtn").onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(SITE_CONFIG.upiId);
+        const btn = document.getElementById("copyUpiBtn");
+        btn.textContent = "Copied ✓";
+        setTimeout(() => { btn.textContent = "Copy UPI ID"; }, 2000);
+      } catch (_) {}
+    };
 
     (async function checkEngine() {
       const badge = document.getElementById("statusBadge");

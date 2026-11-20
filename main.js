@@ -39,7 +39,6 @@ let activeRequestId = 0;
 let busyWatchdog = null;
 let snipCorner1 = null;
 let snipCornerTimer = null;
-let hudSuppressed = false;
 
 let escRegistered = false;
 let hideTimer = null;
@@ -103,7 +102,7 @@ const SHORTCUT_LABELS = [
   ["followup", "Ask Follow-Up on Last Answer"],
   ["apiKey", "Personal API Key / Pro Share"],
   ["pinHud", "Pin / Unpin HUD Pill"],
-  ["cycleHistory", "Cycle Previous Answers"],
+  ["cycleHistory", "Show Last / Cycle Answers"],
   ["ghostPaste", "Ghost Paste Active Answer"],
 ];
 
@@ -120,12 +119,12 @@ const DEFAULT_BYOK_MODELS = {
   groq_vision: ["qwen/qwen3.8-27b"],
   gemini: ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"],
   nvidia_text: [
-    "nvidia/nemotron-3.5-lightning-30b-a3b",
     "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
   ],
   nvidia_vision: [
-    "nvidia/nemotron-3.5-super-vl-120b-a12b",
     "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
   ],
   openrouter_text: ["openrouter/free", "google/gemma-4-31b-it:free"],
   openrouter_vision: [
@@ -422,7 +421,6 @@ function enforceCaptureInvisibility(win) {
 }
 
 function beginRequest() {
-  hudSuppressed = false;
   activeRequestId += 1;
   const reqId = activeRequestId;
   isBusy = true;
@@ -430,9 +428,7 @@ function beginRequest() {
   busyWatchdog = setTimeout(() => {
     if (activeRequestId === reqId && isBusy) {
       isBusy = false;
-      if (!hudSuppressed) {
-        showHud({ mode: "error", cursor_pill: "Timed out — retry scan" }, 2400);
-      }
+      showHud({ mode: "error", cursor_pill: "Timed out — retry scan" }, 2400);
     }
   }, 21000);
   return reqId;
@@ -452,9 +448,8 @@ function clearSnipCorner() {
   snipCornerTimer = null;
 }
 
-// Alt+X / Esc: Vanish/Hide visually ONLY — never cancels an in-flight scan or resets history/state
+// Alt+X / Esc: Vanishes overlays immediately without cancelling in-flight scans or blocking the incoming answer
 function hideOverlaysOnly() {
-  hudSuppressed = true;
   clearTimeout(hideTimer);
   stopCursorFollow();
 
@@ -468,7 +463,6 @@ function hideOverlaysOnly() {
 // F10 (customizable): Hard cancel & full reset of any stuck scan or 2-corner snip
 function forceResetAll() {
   isPinned = false;
-  hudSuppressed = false;
   activeRequestId += 1;
   isBusy = false;
   clearTimeout(busyWatchdog);
@@ -1060,7 +1054,6 @@ function stopCursorFollow() {
 function showHud(payload, autoHideMs = 0) {
   if (!hudWin || hudWin.isDestroyed()) createHudWindow();
 
-  hudSuppressed = false;
   clearTimeout(hideTimer);
 
   const isLoading = payload.mode === "loading";
@@ -1314,7 +1307,7 @@ function syncSidecar() {
   }
 }
 
-// --- Built-in GUI Shortcut Customizer (zero edits needed to index.html or preload.js) ---
+// --- Built-in GUI Shortcut Customizer ---
 function ensureShortcutEditorAssets() {
   const preloadCode = [
     'const { contextBridge, ipcRenderer } = require("electron");',
@@ -1494,7 +1487,7 @@ async function captureDisplayNative(display) {
   return { image: match.thumbnail, sf };
 }
 
-async function captureAroundCursorBuffer(boxW = 960, boxH = 680, fullScreen = false) {
+async function captureAroundCursorBuffer(boxW = 960, boxH = 680, fullScreen = false, vBias = 0.35) {
   const pt = screen.getCursorScreenPoint();
   const disp = screen.getDisplayNearestPoint(pt);
   const { image, sf } = await captureDisplayNative(disp);
@@ -1520,7 +1513,7 @@ async function captureAroundCursorBuffer(boxW = 960, boxH = 680, fullScreen = fa
   );
   const top = Math.max(
     0,
-    Math.min(Math.round(relY * sf - cropH * 0.25), sz.height - cropH)
+    Math.min(Math.round(relY * sf - cropH * vBias), sz.height - cropH)
   );
 
   return image.crop({ x: left, y: top, width: cropW, height: cropH }).toJPEG(78);
@@ -1540,7 +1533,7 @@ async function captureBetweenPointsBuffer(p1, p2) {
   const rawH = Math.abs(relY2 - relY1);
 
   if (rawW < 20 || rawH < 20) {
-    return captureAroundCursorBuffer(960, 680, false);
+    return captureAroundCursorBuffer(960, 680, false, 0.35);
   }
 
   const pad = Math.round(28 * sf);
@@ -1550,12 +1543,13 @@ async function captureBetweenPointsBuffer(p1, p2) {
   const h = Math.min(sz.height - y, Math.round(rawH * sf + pad * 2));
 
   if (w < 10 || h < 10) {
-    return captureAroundCursorBuffer(960, 680, false);
+    return captureAroundCursorBuffer(960, 680, false, 0.35);
   }
 
   return image.crop({ x, y, width: w, height: h }).toJPEG(80);
 }
 
+// Guaranteed Ctrl-safe text grabber: NEVER kills PowerShell mid-keystroke; always releases Ctrl in finally{}
 function grabSelectedTextDirectly() {
   if (process.platform !== "win32") {
     return Promise.resolve("");
@@ -1565,38 +1559,49 @@ function grabSelectedTextDirectly() {
     const sentinel = `__CC_WAIT_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
     const prev = clipboard.readText();
     let settled = false;
+    let psExitedAt = 0;
 
     clipboard.writeText(sentinel);
 
     const ps = `
 Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace U;
-[U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 35;
-[U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 25;
-[U.K]::keybd_event(0x43, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+try {
+  [U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero);
+  Start-Sleep -Milliseconds 30;
+  [U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero);
+  Start-Sleep -Milliseconds 15;
+} finally {
+  [U.K]::keybd_event(0x43, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA2, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA3, 0, 2, [UIntPtr]::Zero);
+}
 `;
 
-    const child = execFile(
+    execFile(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
       { windowsHide: true },
-      () => {}
+      () => {
+        psExitedAt = Date.now();
+      }
     );
 
     const finish = (val) => {
       if (settled) return;
       settled = true;
       clearInterval(poll);
-      try {
-        child.kill();
-      } catch (_) {}
-      clipboard.writeText(prev);
-      resolve(val);
+      // Small 35ms settle ensures PowerShell's finally{} has released Ctrl before restoring previous clipboard
+      setTimeout(() => {
+        try {
+          clipboard.writeText(prev);
+        } catch (_) {}
+        resolve(val);
+      }, 35);
     };
 
     let checks = 0;
@@ -1605,7 +1610,9 @@ Start-Sleep -Milliseconds 25;
       const current = clipboard.readText();
       if (current && current !== sentinel) {
         finish(current.trim());
-      } else if (checks >= 46) {
+      } else if (psExitedAt > 0 && Date.now() - psExitedAt > 140) {
+        finish("");
+      } else if (checks >= 72) {
         finish("");
       }
     }, 25);
@@ -1626,15 +1633,20 @@ function ghostPasteActiveValue() {
 
   const ps = `
 Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace U;
-[U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 40;
-[U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 25;
-[U.K]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+try {
+  [U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
+  Start-Sleep -Milliseconds 35;
+  [U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero);
+  Start-Sleep -Milliseconds 15;
+} finally {
+  [U.K]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA2, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA3, 0, 2, [UIntPtr]::Zero);
+}
 `;
 
   execFile(
@@ -1725,7 +1737,7 @@ async function handleInstantScan() {
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
-    const buf = await captureAroundCursorBuffer(960, 680, false);
+    const buf = await captureAroundCursorBuffer(960, 680, false, 0.35);
     if (activeRequestId !== reqId) return;
 
     let res = await runAnalysisPipeline({
@@ -1747,7 +1759,7 @@ async function handleInstantScan() {
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, "[Smart Screen Scan]");
   } catch (_) {
-    if (activeRequestId === reqId && !hudSuppressed) {
+    if (activeRequestId === reqId) {
       showHud({ mode: "error", cursor_pill: "Retry scan" }, 2400);
     }
   } finally {
@@ -1798,7 +1810,7 @@ async function handleTwoCornerSnip() {
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, "[2-Corner Snip]");
   } catch (_) {
-    if (activeRequestId === reqId && !hudSuppressed) {
+    if (activeRequestId === reqId) {
       showHud({ mode: "error", cursor_pill: "Retry snip" }, 2400);
     }
   } finally {
@@ -1826,7 +1838,8 @@ async function handleTextAction(actionMode = "solve") {
         actionMode,
       });
     } else {
-      const buf = await captureAroundCursorBuffer(960, 680, false);
+      // Upward bias (0.58) centers the question the cursor just finished highlighting instead of the question below
+      const buf = await captureAroundCursorBuffer(960, 680, false, 0.58);
       if (activeRequestId !== reqId) return;
       sourceLabel = `[Cursor ${actionMode} Scan]`;
       res = await runAnalysisPipeline({
@@ -1839,7 +1852,7 @@ async function handleTextAction(actionMode = "solve") {
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, sourceLabel);
   } catch (_) {
-    if (activeRequestId === reqId && !hudSuppressed) {
+    if (activeRequestId === reqId) {
       showHud({ mode: "error", cursor_pill: "Retry hotkey" }, 2400);
     }
   } finally {
@@ -1855,18 +1868,16 @@ function handleResult(res, elapsed, sourceContext) {
     res.detected_type === "ERROR" ||
     !res.cursor_pill
   ) {
-    if (!hudSuppressed) {
-      showHud(
-        {
-          mode: "error",
-          cursor_pill:
-            (res && typeof res.cursor_pill === "string" && res.cursor_pill) ||
-            "High traffic — retry",
-          key_source: (res && res.key_source) || undefined,
-        },
-        3200
-      );
-    }
+    showHud(
+      {
+        mode: "error",
+        cursor_pill:
+          (res && typeof res.cursor_pill === "string" && res.cursor_pill) ||
+          "High traffic — retry",
+        key_source: (res && res.key_source) || undefined,
+      },
+      3200
+    );
     return;
   }
 
@@ -1891,9 +1902,8 @@ function handleResult(res, elapsed, sourceContext) {
   if (history.length > 15) history.pop();
   historyIdx = 0;
 
-  if (!hudSuppressed) {
-    showHud(item, 8500);
-  }
+  // Always show the finished answer pill at cursor even if Alt+X hid the loading dots
+  showHud(item, 8500);
   syncSidecar();
 }
 
@@ -1927,7 +1937,7 @@ async function processSpotlightQuery(_event, query) {
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, query);
   } catch (_) {
-    if (activeRequestId === reqId && !hudSuppressed) {
+    if (activeRequestId === reqId) {
       showHud({ mode: "error", cursor_pill: "Retry Spotlight" }, 2400);
     }
   } finally {
@@ -2130,10 +2140,16 @@ function getActionHandlers() {
         if (hudWin.isVisible()) startCursorFollow();
       }
     },
+    // Pressing Alt+H while hidden immediately re-shows the latest answer right at cursor
     cycleHistory: () => {
       if (!history.length) return;
-      historyIdx = (historyIdx + 1) % history.length;
-      showHud(history[historyIdx], 0);
+      const visible = hudWin && !hudWin.isDestroyed() && hudWin.isVisible();
+      if (!visible) {
+        historyIdx = 0;
+      } else {
+        historyIdx = (historyIdx + 1) % history.length;
+      }
+      showHud(history[historyIdx], 8500);
       syncSidecar();
     },
     hideOnly: hideOverlaysOnly,

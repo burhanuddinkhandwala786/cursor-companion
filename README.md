@@ -1,47 +1,64 @@
-# Cursor Companion (v1.0.0)
+# Cursor Companion (v3.1.0)
 
-**An invisible, zero-clutter AI study & engineering companion that lives right on your cursor.**  
-No browser tabs, no sidebars, no screen clutter—just press a hotkey over any problem, equation, diagram, or code snippet and get an instant, verified answer right at your pointer tip.
+**A lightweight, zero-focus AI desktop HUD for Windows — built for students, developers, and fast workflows.**
 
----
+No cluttered browser tabs, no heavy chat sidebars, and no ₹1,500/month subscriptions. Press a hotkey over any problem, equation, code snippet, or spreadsheet formula and get a verified answer right beside your cursor in ~1.5 seconds.
 
-## Quick Start (For First-Time Users)
-
-### 1. Download & Run (Windows 10 / 11)
-* **Standard Installer (Recommended):** Download **`Cursor Companion Setup 1.0.0.exe`** from [**Releases**](../../releases/latest).
-* **No-Install Portable Version:** Download **`Cursor Companion 1.0.0.exe`** to run immediately from any folder or USB drive.
-* *Windows SmartScreen Note:* Because this is an independent v1.0 release without a paid corporate certificate, Windows may show *"Windows protected your PC"*. Click **More info $\rightarrow$ Run anyway**.
-
-### 2. How to Know It’s Running
-* By design, **nothing appears on your screen until you press a hotkey**—your desktop stays 100% clean.
-* Look in your **Windows System Tray** (bottom-right near the clock, click the `^` arrow if hidden) for the **blue dot icon**. Right-click it anytime for the shortcut cheat sheet, server health check, local study log, or feedback link.
-* On your very first launch, a welcome card will pop up automatically to walk you through the controls.
+🌐 **Official Website & Quick Start:** [burhanuddinkhandwala786.github.io/cursor-companion](https://burhanuddinkhandwala786.github.io/cursor-companion/)  
+⬇️ **Download Latest Windows Installer:** [Cursor Companion v3.1.0 (.exe)](https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest)
 
 ---
 
-## Complete Shortcut Guide (For New & Power Users)
+## Key Features
 
-| Shortcut | Name | What It Does | Best Used For |
-| :--- | :--- | :--- | :--- |
-| **`Alt + A`** | **Instant Cursor Scan** | Captures the area around your pointer and solves it in ~1.5s | MCQs, numerical problems, multi-mark comparisons |
-| **`Alt + Q`** | **Region Snip** | Turns cursor into a crosshair—drag a box over anything | Circuit diagrams, graphs, full-page questions |
-| **`Alt + C`** | **Smart Text / Auto-Fallback** | Solves highlighted text (or auto-scans screen if copying is blocked) | Code snippets, definitions, copy-protected pages |
-| **`Alt + F`** | **Inline Follow-Up** | Opens a mini prompt inside the cursor pill | Asking *"explain step 2"*, *"give formula"*, or *"why?"* |
-| **`Alt + P`** | **Pin & Ghost Mode** | Anchors the answer card in place; auto-fades to 25% opacity when your mouse moves away | Reading 5-mark answers while typing notes |
-| **`Alt + H`** | **History Recall** | Cycles through your last 10 answers offline without re-scanning | Reviewing previous questions quickly |
-| **`Alt + M`** | **Health & Telemetry** | Displays live server ping, active AI model, and scan count | Checking connection speed |
-| **`Alt + X`** | **Instant Vanish** | Dismisses the card and resets back to 100% invisible mode | Clearing the screen immediately |
-
-### Pro Tips for Returning Users
-* **Auto-Copy:** Numerical values, code fixes, and 5-mark structured breakdowns are **automatically copied to your clipboard** (`COPIED` badge appears)—just press `Ctrl + V` in your notes.
-* **Offline Study Log:** Every solved question is saved locally. Right-click the **blue tray icon $\rightarrow$ Open Local Study Log** to review everything you studied.
-* **Click to Dismiss:** Clicking anywhere on the answer card (or pressing `Alt + X`) immediately hides it.
+- **Zero-Focus 2-Corner Snip (`F9` / `Alt + Q`):** Tap once at top-left and once at bottom-right. No clickable overlay window and zero window focus theft.
+- **Verification-First Accuracy:** Enforces step-by-step internal verification for `NOT` / `EXCEPT` traps and compound choices (`Both B and C`, `All of the above`) before showing the final answer pill.
+- **Customizable Global Shortcuts:** Right-click the System Tray icon → **Customize Shortcuts...** to rebind or disable any hotkey that clashes with VS Code, IDEs, or games.
+- **Native Capture Protection:** Uses Windows native content protection (`WDA_EXCLUDEFROMCAPTURE`) with zero background PowerShell clutter.
+- **Self-Healing 5-Provider Cloud Failover:** Shared pool routes automatically across Groq, Google Gemini, Cloudflare Workers AI, NVIDIA NIM, and OpenRouter—auto-discovering live models if a provider ever retires one.
+- **Modular Mode Packs:** Switch from the tray between **Exam & Academic Solver**, **Coding & DSA Interview Pack**, and **Excel & Finance Formula Pack**, or add your own custom JSON packs in `%APPDATA%\cursor-companion\mode-packs.json`.
+- **Hardware-Encrypted Local Keys:** Personal API keys entered in `Alt + K` are encrypted at rest via Windows DPAPI (`electron.safeStorage`) and connect directly from your PC to the AI provider.
 
 ---
 
-## Share Feedback & Request Features
-Testing on a new laptop, different screen resolution, or study workflow?  
-Right-click the **blue tray icon $\rightarrow$ Send Feedback / Report Bug**, or [**open an issue here**](../../issues/new) with:
-1. Your Windows version & screen resolution/scaling (e.g., 1080p @ 125%)
-2. What worked well or felt slow
-3. Any new shortcut or feature you'd like in v1.1
+## Default Hotkeys (All Customizable in Tray)
+
+| Hotkey | Action |
+| :--- | :--- |
+| **`F8`** *(or `Alt + A`)* | Smart Screen Scan around cursor (auto-widens if cropped) |
+| **`F9`** *(or `Alt + Q`)* | Zero-Focus 2-Corner Snip (tap top-left, then bottom-right) |
+| **`Alt + C`** | Solve Highlighted Text |
+| **`Alt + W` / `Alt + E`** | Rewrite / Explain Highlighted Text |
+| **`Alt + X`** *(or `Esc`)* | Vanish Overlay Only (does not cancel active scan) |
+| **`Alt + H`** | Re-show Latest Answer / Cycle History |
+| **`F10`** | Force Cancel & Reset Pending Scan |
+| **`Alt + D`** | Toggle Study Sidecar (last 15 answers) |
+| **`Alt + G` / `Alt + F`** | Open Spotlight Ask Bar / Follow-up on Last Answer |
+| **`Alt + P`** | Pin / Unpin HUD Pill |
+| **`Alt + Enter`** | Ghost Paste Active Answer |
+| **`Alt + K`** | Add Personal Free API Key (Unlimited) or `share:<KEY>` for Pro Pool |
+
+---
+
+## 100% Free Forever — How Quotas Work
+
+1. **Instant Trial (Zero Setup):** Every install includes **10 free shared-pool scans/day** right out of the box (cached hits are unlimited).
+2. **Unlimited Private Speed (`Alt + K`):** Grab a ₹0 free API key from [Groq](https://console.groq.com/keys) (1,000 req/day) or [Google AI Studio](https://aistudio.google.com/apikey) (no credit card required), press **`Alt + K`**, and paste it (you can even paste two comma-separated keys like `gsk_..., AIza...` for personal failover). Your PC then talks straight to the AI provider with unlimited speed.
+3. **Community Pro Pool (`share:<KEY>`):** Prefer multi-cloud pooled failover? Type `share:YOUR_FREE_KEY` in **`Alt + K`** to contribute one free key to the encrypted community pool and unlock **150/day Pro Pool** priority for your device.
+
+---
+
+## Installation & Windows SmartScreen Note
+
+1. Download **`Cursor Companion Setup 3.1.0.exe`** from [Releases](https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest).
+2. Because this is an independent, open-source student project without a paid $400/yr code-signing certificate, Windows SmartScreen may show *"Windows protected your PC"*. Click **More info → Run anyway** (you can inspect the full client source code in the `v3` branch and verify the VirusTotal scan link on the Release page).
+3. Cursor Companion runs quietly in your bottom-right **Windows System Tray**.
+
+---
+
+## Feedback & Voluntary Support
+
+- **Report a bug or request a feature:** [Open a GitHub Issue](https://github.com/burhanuddinkhandwala786/cursor-companion/issues/new)
+- **Support hosting upkeep (100% optional):** Visit the [official website](https://burhanuddinkhandwala786.github.io/cursor-companion/#community) for the UPI QR.
+
+Built by [Burhanuddin Khandwala](https://github.com/burhanuddinkhandwala786).

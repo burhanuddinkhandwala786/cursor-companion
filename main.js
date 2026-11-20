@@ -9,6 +9,7 @@ const {
   Tray,
   Menu,
   nativeImage,
+  shell,
 } = require("electron");
 
 const path = require("path");
@@ -22,6 +23,7 @@ const BACKEND_URL = "https://study-buddy-brain.onrender.com";
 
 let SETTINGS_PATH = "";
 let PACKS_PATH = "";
+let REMOTE_CONFIG_PATH = "";
 
 let hudWin = null;
 let spotlightWin = null;
@@ -56,6 +58,31 @@ let settings = {
   localOcr: false, // Keep OFF for zero-process stealth on SHL/AMCAT; toggle ON in Tray for Turbo OCR + Cross-User Cache
   activePack: "default",
   deviceId: crypto.randomUUID(),
+};
+
+const DEFAULT_BYOK_MODELS = {
+  groq_text: ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
+  groq_vision: ["qwen/qwen3.8-27b"],
+  gemini: ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"],
+  mistral_text: ["mistral-small-latest"],
+  mistral_vision: ["mistral-small-latest"],
+  openrouter_text: ["openrouter/free", "google/gemma-4-31b-it:free"],
+  openrouter_vision: ["openrouter/free", "google/gemma-4-31b-it:free"],
+  cerebras_text: ["gpt-oss-120b", "qwen-3.8-27b"],
+  cerebras_vision: ["qwen-3.8-27b"],
+  nvidia_text: [
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "mistralai/mistral-large-4-1t-a52b",
+  ],
+  nvidia_vision: ["mistralai/mistral-large-4-1t-a52b"],
+};
+
+let remoteConfig = {
+  latest_version: "",
+  release_url: "https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest",
+  notice: "",
+  byok_models: { ...DEFAULT_BYOK_MODELS },
 };
 
 let modePacks = {};
@@ -157,6 +184,7 @@ function initSettingsPath() {
   const userDir = app.getPath("userData");
   SETTINGS_PATH = path.join(userDir, "v3-settings.json");
   PACKS_PATH = path.join(userDir, "mode-packs.json");
+  REMOTE_CONFIG_PATH = path.join(userDir, "remote-config.json");
 }
 
 function loadModePacks() {
@@ -216,6 +244,54 @@ function saveSettings(next) {
   }
 }
 
+function mergeRemoteConfig(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  const mergedModels = { ...DEFAULT_BYOK_MODELS };
+  if (data.byok_models && typeof data.byok_models === "object") {
+    for (const [k, v] of Object.entries(data.byok_models)) {
+      if (Array.isArray(v) && v.length > 0 && v.every((m) => typeof m === "string" && m.trim())) {
+        mergedModels[k] = v.map((m) => m.trim());
+      }
+    }
+  }
+  remoteConfig = {
+    latest_version: typeof data.latest_version === "string" ? data.latest_version.trim() : remoteConfig.latest_version,
+    release_url:
+      typeof data.release_url === "string" && data.release_url.startsWith("https://")
+        ? data.release_url.trim()
+        : remoteConfig.release_url,
+    notice: typeof data.notice === "string" ? data.notice.trim() : "",
+    byok_models: mergedModels,
+  };
+}
+
+function loadCachedRemoteConfig() {
+  try {
+    if (REMOTE_CONFIG_PATH && fs.existsSync(REMOTE_CONFIG_PATH)) {
+      mergeRemoteConfig(JSON.parse(fs.readFileSync(REMOTE_CONFIG_PATH, "utf8")));
+    }
+  } catch (_) {}
+}
+
+function getByokModels(slot) {
+  const list = remoteConfig.byok_models && remoteConfig.byok_models[slot];
+  if (Array.isArray(list) && list.length > 0) return list;
+  return DEFAULT_BYOK_MODELS[slot] || [];
+}
+
+function isNewerVersion(remoteVer, currentVer) {
+  if (!remoteVer || !currentVer) return false;
+  const rParts = String(remoteVer).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  const cParts = String(currentVer).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(rParts.length, cParts.length); i++) {
+    const r = rParts[i] || 0;
+    const c = cParts[i] || 0;
+    if (r > c) return true;
+    if (r < c) return false;
+  }
+  return false;
+}
+
 // Native C++ WDA_EXCLUDEFROMCAPTURE via Electron — zero powershell.exe spawns
 function enforceCaptureInvisibility(win) {
   if (!win || win.isDestroyed()) return;
@@ -229,7 +305,6 @@ function beginRequest() {
   const reqId = activeRequestId;
   isBusy = true;
   clearTimeout(busyWatchdog);
-  // 27s safety watchdog (> 23s network timeout) guarantees app never freezes
   busyWatchdog = setTimeout(() => {
     if (activeRequestId === reqId && isBusy) {
       isBusy = false;
@@ -334,6 +409,52 @@ function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 12000) {
     req.on("error", reject);
     req.end(body);
   });
+}
+
+function httpsGetJson(urlStr, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      urlStr,
+      { agent: false, family: 4, timeout: timeoutMs },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("error", reject);
+        res.on("end", () => {
+          if (res.statusCode !== 200) {
+            return reject(new Error(`HTTP ${res.statusCode}`));
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error("Timeout")));
+    req.on("error", reject);
+  });
+}
+
+// Wakes backend + syncs dynamic BYOK models & update metadata silently on startup
+async function syncRemoteConfig() {
+  try {
+    const data = await httpsGetJson(BACKEND_URL + "/v3_1/config", 12000);
+    if (data && typeof data === "object") {
+      mergeRemoteConfig(data);
+      if (REMOTE_CONFIG_PATH) {
+        try {
+          fs.mkdirSync(path.dirname(REMOTE_CONFIG_PATH), { recursive: true });
+          fs.writeFileSync(REMOTE_CONFIG_PATH, JSON.stringify(remoteConfig, null, 2), "utf8");
+        } catch (_) {}
+      }
+      rebuildTrayMenu();
+    }
+  } catch (_) {}
 }
 
 // Brace-safe JSON parser: never breaks on coding questions or math sets containing {}
@@ -468,7 +589,9 @@ async function querySingleGeminiModel(key, model, sysInstruction, promptText, im
     throw new Error(`${model}:nonJSON`);
   }
 
-  if (res.status === 429 || res.status === 503 || res.status === 504) {
+  if (res.status === 402) {
+    setByokCooldown(key, model, 86400000, modality);
+  } else if (res.status === 429 || res.status === 503 || res.status === 504) {
     setByokCooldown(key, model, 45000, modality);
   } else if (res.status === 404 || res.status === 400) {
     setByokCooldown(key, model, 3600000, modality);
@@ -538,7 +661,9 @@ async function querySingleOpenAiCompat(key, endpoint, model, providerTag, sysIns
     throw new Error(`${model}:nonJSON`);
   }
 
-  if (res.status === 429 || res.status === 503 || res.status === 504) {
+  if (res.status === 402) {
+    setByokCooldown(key, model, 86400000, modality);
+  } else if (res.status === 429 || res.status === 503 || res.status === 504) {
     setByokCooldown(key, model, 30000, modality);
   } else if (res.status === 400 || res.status === 404) {
     setByokCooldown(key, model, 3600000, modality);
@@ -554,7 +679,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
       detected_type: "ERROR",
       cursor_pill: "Invalid key format in Alt+K",
       copy_value: "",
-      expanded_note: "Paste a valid key: csk-, gsk_, AIza, AQ., mistral:, nvapi-, sk-or-, or sk-",
+      expanded_note: "Paste a valid key: gsk_, AIza, AQ., mistral:, sk-or-, csk-, nvapi-, or sk-",
       key_source: "BYOK",
     };
   }
@@ -566,7 +691,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
 
   for (const rawKey of keys) {
     if (rawKey.startsWith("AIza") || rawKey.startsWith("AQ.")) {
-      const models = ["gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"];
+      const models = getByokModels("gemini");
       for (const model of models) {
         if (isByokCoolingDown(rawKey, model, modality)) continue;
         try {
@@ -579,59 +704,53 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
         }
       }
     } else if (
-      rawKey.startsWith("csk-") ||
       rawKey.startsWith("gsk_") ||
+      rawKey.startsWith("csk-") ||
       rawKey.startsWith("nvapi-") ||
       rawKey.startsWith("sk-") ||
       rawKey.toLowerCase().startsWith("mistral:")
     ) {
-      const isCerebras = rawKey.startsWith("csk-");
       const isGroq = rawKey.startsWith("gsk_");
+      const isCerebras = rawKey.startsWith("csk-");
       const isNvidia = rawKey.startsWith("nvapi-");
       const isOr = rawKey.startsWith("sk-or-");
       const isMistral = rawKey.toLowerCase().startsWith("mistral:");
 
       const actualKey = isMistral ? rawKey.slice(8).trim() : rawKey;
-      const providerTag = isCerebras
-        ? "cerebras"
-        : isGroq
-          ? "groq"
-          : isMistral
-            ? "mistral"
-            : isNvidia
-              ? "nvidia"
-              : isOr
-                ? "openrouter"
+      const providerTag = isGroq
+        ? "groq"
+        : isMistral
+          ? "mistral"
+          : isOr
+            ? "openrouter"
+            : isCerebras
+              ? "cerebras"
+              : isNvidia
+                ? "nvidia"
                 : "openai";
 
-      const endpoint = isCerebras
-        ? "https://api.cerebras.ai/v1/chat/completions"
-        : isGroq
-          ? "https://api.groq.com/openai/v1/chat/completions"
-          : isMistral
-            ? "https://api.mistral.ai/v1/chat/completions"
-            : isNvidia
-              ? "https://integrate.api.nvidia.com/v1/chat/completions"
-              : isOr
-                ? "https://openrouter.ai/api/v1/chat/completions"
+      const endpoint = isGroq
+        ? "https://api.groq.com/openai/v1/chat/completions"
+        : isMistral
+          ? "https://api.mistral.ai/v1/chat/completions"
+          : isOr
+            ? "https://openrouter.ai/api/v1/chat/completions"
+            : isCerebras
+              ? "https://api.cerebras.ai/v1/chat/completions"
+              : isNvidia
+                ? "https://integrate.api.nvidia.com/v1/chat/completions"
                 : "https://api.openai.com/v1/chat/completions";
 
-      const modelList = isCerebras
-        ? imgB64
-          ? ["qwen-3.8-27b"]
-          : ["gpt-oss-120b", "qwen-3.8-27b"]
-        : isGroq
-          ? imgB64
-            ? ["qwen/qwen3.8-27b"]
-            : ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
-          : isMistral
-            ? ["mistral-small-latest", "mistral-large-latest"]
-            : isNvidia
-              ? imgB64
-                ? ["mistralai/mistral-large-4-1t-a52b"]
-                : ["nvidia/nemotron-3.5-lightning-30b-a3b", "nvidia/nemotron-3.5-bolt-e4b", "mistralai/mistral-large-4-1t-a52b"]
-              : isOr
-                ? ["openrouter/free", "google/gemma-4-31b-it:free"]
+      const modelList = isGroq
+        ? getByokModels(imgB64 ? "groq_vision" : "groq_text")
+        : isMistral
+          ? getByokModels(imgB64 ? "mistral_vision" : "mistral_text")
+          : isOr
+            ? getByokModels(imgB64 ? "openrouter_vision" : "openrouter_text")
+            : isCerebras
+              ? getByokModels(imgB64 ? "cerebras_vision" : "cerebras_text")
+              : isNvidia
+                ? getByokModels(imgB64 ? "nvidia_vision" : "nvidia_text")
                 : ["gpt-4o-mini"];
 
       for (const model of modelList) {
@@ -665,7 +784,7 @@ async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
   };
 }
 
-// Zero duplicate client retries — Render handles full 6-provider cascade internally
+// Zero duplicate client retries — Render handles the full permanent cascade internally
 async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
   const url = new URL(endpoint, BACKEND_URL);
   const reqTimeout = payload.image_base64 ? 23000 : 20000;
@@ -1191,7 +1310,6 @@ async function captureBetweenPointsBuffer(p1, p2) {
 }
 
 async function analyzeCapturedBuffer(jpegBuffer, actionMode = "solve") {
-  // If Turbo Local OCR is toggled ON, convert screenshot to text -> 3,000 tok/s Cerebras + 40ms shared cache
   if (settings.localOcr) {
     const ocrText = await runWindowsLocalOcr(jpegBuffer);
     if (ocrText && ocrText.length >= 30) {
@@ -1400,7 +1518,6 @@ async function handleInstantScan() {
   }
 }
 
-// Zero-Focus 2-Corner Snip (F9 / Alt+Q): zero clickable overlay window, zero focus loss
 async function handleTwoCornerSnip() {
   if (isBusy) return;
 
@@ -1515,7 +1632,7 @@ function handleResult(res, elapsed, sourceContext) {
           "High traffic — retry",
         key_source: (res && res.key_source) || undefined,
       },
-      2800
+      3200
     );
     return;
   }
@@ -1586,7 +1703,6 @@ async function processSpotlightQuery(_event, query) {
 ipcMain.on("hud-spotlight-query", processSpotlightQuery);
 ipcMain.on("hud-followup", processSpotlightQuery);
 
-// Supports personal BYOK keys OR "share:<KEY>" to contribute 1 free key & unlock Pro Community Pool
 ipcMain.on("hud-save-key", async (_event, key) => {
   if (typeof key !== "string") return;
 
@@ -1723,6 +1839,9 @@ ipcMain.on("hud-hide", dismissAllOverlays);
 function rebuildTrayMenu() {
   if (!tray) return;
 
+  const currentVersion = app.getVersion() || "3.1.0";
+  const hasUpdate = isNewerVersion(remoteConfig.latest_version, currentVersion);
+
   const packSubmenu = Object.entries(modePacks).map(([id, pack]) => ({
     label: pack.label || id,
     type: "radio",
@@ -1743,43 +1862,60 @@ function rebuildTrayMenu() {
     },
   }));
 
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: "Cursor Companion V3.1 (Immortal)", enabled: false },
-      { type: "separator" },
-      { label: "Smart Scan (F8 / Alt + A)", click: () => handleInstantScan() },
-      { label: "2-Corner Snip (F9 / Alt + Q)", click: () => handleTwoCornerSnip() },
-      { label: "Solve Selection (Alt + C)", click: () => handleTextAction("solve") },
-      { label: "Rewrite Selection (Alt + W)", click: () => handleTextAction("rewrite") },
-      { label: "Explain Selection (Alt + E)", click: () => handleTextAction("explain") },
-      { type: "separator" },
-      { label: "Mode Packs", submenu: packSubmenu },
-      {
-        label: "Turbo Local OCR (OFF = Exam Stealth)",
-        type: "checkbox",
-        checked: Boolean(settings.localOcr),
-        click: (menuItem) => {
-          saveSettings({ localOcr: Boolean(menuItem.checked) });
-          showHud(
-            {
-              mode: "result",
-              detected_type: "DIRECT_VALUE",
-              cursor_pill: menuItem.checked ? "Turbo OCR ON ⚡" : "Exam Stealth Mode ✓",
-              elapsed: "✓",
-            },
-            2000
-          );
-        },
+  const template = [
+    { label: `Cursor Companion v${currentVersion}`, enabled: false },
+  ];
+
+  if (hasUpdate) {
+    template.push({
+      label: `⬇ Update Available (v${remoteConfig.latest_version})`,
+      click: () => shell.openExternal(remoteConfig.release_url),
+    });
+  }
+
+  if (remoteConfig.notice) {
+    template.push({
+      label: `ℹ ${remoteConfig.notice.slice(0, 48)}`,
+      enabled: false,
+    });
+  }
+
+  template.push(
+    { type: "separator" },
+    { label: "Smart Scan (F8 / Alt + A)", click: () => handleInstantScan() },
+    { label: "2-Corner Snip (F9 / Alt + Q)", click: () => handleTwoCornerSnip() },
+    { label: "Solve Selection (Alt + C)", click: () => handleTextAction("solve") },
+    { label: "Rewrite Selection (Alt + W)", click: () => handleTextAction("rewrite") },
+    { label: "Explain Selection (Alt + E)", click: () => handleTextAction("explain") },
+    { type: "separator" },
+    { label: "Mode Packs", submenu: packSubmenu },
+    {
+      label: "Turbo Local OCR (OFF = Exam Stealth)",
+      type: "checkbox",
+      checked: Boolean(settings.localOcr),
+      click: (menuItem) => {
+        saveSettings({ localOcr: Boolean(menuItem.checked) });
+        showHud(
+          {
+            mode: "result",
+            detected_type: "DIRECT_VALUE",
+            cursor_pill: menuItem.checked ? "Turbo OCR ON ⚡" : "Exam Stealth Mode ✓",
+            elapsed: "✓",
+          },
+          2000
+        );
       },
-      { type: "separator" },
-      { label: "Spotlight Bar (Alt + G)", click: () => openSpotlight("ask") },
-      { label: "Study Sidecar (Alt + D)", click: () => toggleSidecar() },
-      { label: "Personal Key / Share Pro (Alt + K)", click: () => openSpotlight("key") },
-      { label: "Cancel / Reset (F10 / Alt + X)", click: () => dismissAllOverlays() },
-      { type: "separator" },
-      { label: "Quit", click: () => app.quit() },
-    ])
+    },
+    { type: "separator" },
+    { label: "Spotlight Bar (Alt + G)", click: () => openSpotlight("ask") },
+    { label: "Study Sidecar (Alt + D)", click: () => toggleSidecar() },
+    { label: "Personal Key / Share Pro (Alt + K)", click: () => openSpotlight("key") },
+    { label: "Cancel / Reset (F10 / Alt + X)", click: () => dismissAllOverlays() },
+    { type: "separator" },
+    { label: "Quit", click: () => app.quit() }
   );
+
+  tray.setContextMenu(Menu.buildFromTemplate(template));
 }
 
 function createTray() {
@@ -1809,12 +1945,13 @@ if (!gotSingleInstanceLock) {
     .then(() => {
       initSettingsPath();
       loadModePacks();
+      loadCachedRemoteConfig();
       settings = loadSettings();
       saveSettings({});
 
       createHudWindow();
       createTray();
-      warmBackend();
+      syncRemoteConfig();
 
       keepAliveTimer = setInterval(warmBackend, 240000);
 

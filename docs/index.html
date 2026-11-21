@@ -662,7 +662,7 @@
       const badge = document.getElementById("statusBadge");
       const text = document.getElementById("statusText");
 
-      fetch("https://study-buddy-brain.onrender.com/healthz", { cache: "no-store" })
+      fetch("https://study-buddy-brain.onrender.com/healthz?t=" + Date.now())
         .then((res) => {
           if (!res.ok) throw new Error("Booting");
           return res.json();

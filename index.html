@@ -2,512 +2,705 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
   <title>Cursor Companion</title>
   <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: "Segoe UI Variable", "Segoe UI", "Inter", system-ui, -apple-system, sans-serif;
-      -webkit-font-smoothing: antialiased;
+    :root {
+      --bg-glass: rgba(18, 18, 20, 0.86);
+      --bg-card: rgba(28, 28, 30, 0.82);
+      --bg-card-hover: rgba(44, 44, 46, 0.92);
+      --border: rgba(255, 255, 255, 0.13);
+      --border-hi: rgba(255, 255, 255, 0.22);
+      --spec: inset 0 1px 0 rgba(255, 255, 255, 0.11);
+      --ink: #f5f5f7;
+      --ink-2: #a1a1a6;
+      --ink-3: #6e6e73;
+      --blue: #0071e3;
+      --blue-hi: #2997ff;
+      --green: #30d158;
+      --amber: #ff9f0a;
+      --gold: #e5c17b;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
     }
 
-    html,
-    body {
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
       width: 100%;
       height: 100%;
       overflow: hidden;
-      background: transparent !important;
+      background: transparent;
+      font-family: var(--font);
+      color: var(--ink);
+      -webkit-font-smoothing: antialiased;
       user-select: none;
     }
 
-    #hud {
-      display: flex;
+    .view { display: none; width: 100%; height: 100%; }
+    .view.active { display: flex; }
+
+    /* ================= HUD PILL (Whisper-Quiet Obsidian) ================= */
+    #hudView {
       align-items: center;
-      width: 100%;
-      height: 24px;
-      padding: 0 9px;
-      border: 1px solid rgba(255, 255, 255, 0.11);
-      border-radius: 7px;
-      background: #101218;
-      overflow: hidden;
+      justify-content: flex-start;
+      padding: 2px;
     }
 
-    #hud[data-mode="loading"] {
-      padding: 0 8px;
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      height: 26px;
+      max-width: 100%;
+      padding: 0 10px 0 9px;
+      border-radius: 999px;
+      background: linear-gradient(180deg, rgba(30, 30, 34, 0.9), rgba(14, 14, 16, 0.92));
+      border: 1px solid var(--border);
+      box-shadow: var(--spec), 0 8px 24px rgba(0, 0, 0, 0.45);
+      animation: fadeSlide 0.16s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }
+
+    .pill.loading {
+      padding: 0 12px;
       justify-content: center;
     }
 
-    .top-strip {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      width: 100%;
-      height: 100%;
-      min-width: 0;
+    .pill.error {
+      border-color: rgba(255, 159, 10, 0.32);
     }
 
-    #statusDot {
+    .pill.update {
+      border-color: rgba(41, 151, 255, 0.42);
+    }
+
+    .dot {
       width: 5px;
       height: 5px;
-      flex: 0 0 5px;
       border-radius: 50%;
-      background: #10b981;
+      flex-shrink: 0;
+      background: var(--green);
+      box-shadow: 0 0 6px rgba(48, 209, 88, 0.65);
+    }
+    .dot.pool { background: #d2d2d7; box-shadow: 0 0 5px rgba(255, 255, 255, 0.4); }
+    .dot.pro { background: var(--gold); box-shadow: 0 0 6px rgba(229, 193, 123, 0.6); }
+    .dot.cache { background: var(--blue-hi); box-shadow: 0 0 6px rgba(41, 151, 255, 0.6); }
+    .dot.error { background: var(--amber); box-shadow: 0 0 6px rgba(255, 159, 10, 0.6); }
+    .dot.update { background: var(--blue-hi); box-shadow: 0 0 7px rgba(41, 151, 255, 0.8); }
+
+    .pill-text {
+      font-size: 12px;
+      font-weight: 500;
+      letter-spacing: -0.015em;
+      color: var(--ink);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    #hud[data-mode="loading"] #statusDot {
-      background: #38bdf8;
-      animation: pulseDot 0.85s ease-in-out infinite;
+    .pill-meta {
+      font-size: 10px;
+      font-weight: 500;
+      font-variant-numeric: tabular-nums;
+      color: var(--ink-3);
+      flex-shrink: 0;
+      padding-left: 3px;
+      border-left: 1px solid rgba(255, 255, 255, 0.1);
     }
 
-    #hud[data-mode="error"] #statusDot {
-      background: #f43f5e;
+    .pin-mark {
+      font-size: 9px;
+      color: var(--ink-2);
+      flex-shrink: 0;
     }
 
-    @keyframes pulseDot {
-      0%, 100% { opacity: 0.3; }
-      50% { opacity: 1; }
+    /* Breathing precision dots */
+    .loader {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .loader i {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: #d2d2d7;
+      animation: breathe 1.05s ease-in-out infinite;
+    }
+    .loader i:nth-child(2) { animation-delay: 0.16s; }
+    .loader i:nth-child(3) { animation-delay: 0.32s; }
+
+    @keyframes breathe {
+      0%, 80%, 100% { opacity: 0.22; transform: scale(0.85); }
+      40% { opacity: 1; transform: scale(1.1); }
+    }
+    @keyframes fadeSlide {
+      from { opacity: 0; transform: translateY(2px) scale(0.985); }
+      to { opacity: 1; transform: none; }
     }
 
-    #answerViewport {
+    /* ================= SPOTLIGHT BAR (Apple / Tesla Command Bar) ================= */
+    #spotlightView {
+      align-items: center;
+      justify-content: center;
+      padding: 4px;
+    }
+
+    .spot-shell {
+      width: 100%;
+      height: 46px;
       display: flex;
       align-items: center;
+      gap: 10px;
+      padding: 0 12px 0 14px;
+      border-radius: 14px;
+      background: linear-gradient(180deg, rgba(28, 28, 32, 0.94), rgba(14, 14, 16, 0.96));
+      border: 1px solid var(--border-hi);
+      box-shadow: var(--spec), 0 16px 40px rgba(0, 0, 0, 0.65);
+    }
+
+    .spot-badge {
+      font-size: 10.5px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      border-radius: 7px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--ink);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      flex-shrink: 0;
+    }
+    .spot-badge.key { color: var(--gold); border-color: rgba(229, 193, 123, 0.25); background: rgba(229, 193, 123, 0.08); }
+    .spot-badge.followup { color: var(--blue-hi); border-color: rgba(41, 151, 255, 0.28); background: rgba(41, 151, 255, 0.1); }
+
+    .spot-input {
       flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      color: var(--ink);
+      font-family: var(--font);
+      font-size: 13.5px;
+      font-weight: 400;
+      letter-spacing: -0.01em;
+    }
+    .spot-input::placeholder { color: var(--ink-3); }
+
+    .spot-kbd {
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--ink-3);
+      padding: 3px 6px;
+      border-radius: 5px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      flex-shrink: 0;
+    }
+
+    /* ================= STUDY SIDECAR (Machined Glass Blade) ================= */
+    #sidecarView {
+      padding: 4px;
+    }
+
+    .sidecar {
+      width: 100%;
       height: 100%;
-      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(22, 22, 24, 0.94), rgba(10, 10, 12, 0.96));
+      border: 1px solid var(--border);
+      box-shadow: var(--spec), 0 24px 56px rgba(0, 0, 0, 0.7);
       overflow: hidden;
     }
 
-    #minimalAnswer {
-      display: inline-block;
-      width: max-content;
-      white-space: nowrap;
-      color: #f8fafc;
-      font-size: 11px;
-      font-weight: 500;
-      line-height: 1;
-      letter-spacing: 0.1px;
-    }
-
-    #hud[data-mode="loading"] #minimalAnswer {
-      color: #94a3b8;
-      letter-spacing: 1.5px;
-    }
-
-    #hud[data-mode="error"] #minimalAnswer {
-      color: #fda4af;
-    }
-
-    #metaBadge {
-      flex: 0 0 auto;
-      font-size: 9.5px;
-      font-weight: 500;
-      line-height: 1;
-      font-variant-numeric: tabular-nums;
-      color: rgba(148, 163, 184, 0.72);
-    }
-
-    #snip-layer {
-      display: none;
-      position: fixed;
-      inset: 0;
-      cursor: crosshair;
-      background: transparent;
-    }
-
-    #snip-box {
-      position: absolute;
-      display: none;
-      border: 1px dashed rgba(56, 189, 248, 0.65);
-      border-radius: 3px;
-      background: transparent;
-    }
-
-    #spotlight-bar {
-      display: none;
-      align-items: center;
-      gap: 10px;
-      width: 100%;
-      height: 44px;
-      padding: 0 12px;
-      border: 1px solid rgba(255, 255, 255, 0.14);
-      border-radius: 10px;
-      background: #101218;
-    }
-
-    #spotlightTag {
-      flex: 0 0 auto;
-      padding: 3px 7px;
-      border-radius: 5px;
-      background: rgba(56, 189, 248, 0.15);
-      color: #38bdf8;
-      font-size: 10px;
-      font-weight: 600;
-      letter-spacing: 0.4px;
-      text-transform: uppercase;
-    }
-
-    #spotlightInput {
-      flex: 1;
-      height: 28px;
-      border: none;
-      outline: none;
-      background: transparent;
-      color: #f8fafc;
-      font-size: 12px;
-    }
-
-    #spotlightInput::placeholder {
-      color: rgba(148, 163, 184, 0.55);
-    }
-
-    #spotlightHint {
-      flex: 0 0 auto;
-      font-size: 10px;
-      color: rgba(148, 163, 184, 0.55);
-    }
-
-    #sidecar-panel {
-      display: none;
-      flex-direction: column;
-      width: 100%;
-      height: 100%;
-      padding: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      border-radius: 10px;
-      background: #101218;
-      color: #f1f5f9;
-    }
-
-    .sidecar-header {
+    .sc-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding-bottom: 8px;
+      padding: 13px 14px 11px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-      font-size: 11.5px;
-      font-weight: 600;
-      color: #f8fafc;
     }
 
-    .sidecar-badge {
+    .sc-brand {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sc-mark {
+      width: 11px;
+      height: 11px;
+      background: #f5f5f7;
+      clip-path: polygon(0 0, 100% 62%, 56% 68%, 78% 100%, 58% 100%, 38% 72%, 0 90%);
+    }
+    .sc-title {
+      font-size: 12.5px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      color: var(--ink);
+    }
+    .sc-mode {
       font-size: 10px;
       font-weight: 500;
-      color: #38bdf8;
+      color: var(--ink-3);
+      margin-left: 2px;
     }
 
-    .sidecar-keys {
-      margin-top: 8px;
-      padding: 6px 8px;
-      border-radius: 6px;
-      background: rgba(255, 255, 255, 0.03);
-      font-size: 9.5px;
-      color: #94a3b8;
-      line-height: 1.5;
+    .sc-close {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      border: none;
+      background: rgba(255, 255, 255, 0.07);
+      color: var(--ink-2);
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      transition: background 0.15s, color 0.15s;
     }
+    .sc-close:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
 
-    #sidecarList {
-      flex: 1;
-      margin-top: 8px;
-      overflow-y: auto;
-      display: flex;
+    /* Update Banner inside Sidecar */
+    .sc-update {
+      display: none;
+      margin: 10px 10px 0;
+      padding: 10px 11px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, rgba(0, 113, 227, 0.2), rgba(41, 151, 255, 0.08));
+      border: 1px solid rgba(41, 151, 255, 0.35);
+      gap: 8px;
       flex-direction: column;
-      gap: 8px;
-      user-select: text;
     }
-
-    #sidecarList::-webkit-scrollbar {
-      width: 4px;
-    }
-
-    #sidecarList::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.16);
-      border-radius: 4px;
-    }
-
-    .sc-card {
-      padding: 9px 10px;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.07);
-      background: #161922;
-    }
-
-    .sc-card.active {
-      border-color: rgba(56, 189, 248, 0.45);
-      background: #18202c;
-    }
-
-    .sc-top {
+    .sc-update.visible { display: flex; }
+    .sc-update-top {
       display: flex;
+      align-items: center;
       justify-content: space-between;
-      align-items: baseline;
-      gap: 8px;
-    }
-
-    .sc-pill {
       font-size: 11.5px;
       font-weight: 600;
-      color: #f8fafc;
+      color: #fff;
+    }
+    .sc-update-sub {
+      font-size: 10.5px;
+      color: #b4d8ff;
       line-height: 1.35;
     }
-
-    .sc-meta {
-      font-size: 9.5px;
-      color: #94a3b8;
-      white-space: nowrap;
+    .sc-update-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 2px;
     }
+    .sc-btn {
+      font-family: var(--font);
+      font-size: 10.5px;
+      font-weight: 600;
+      border: none;
+      border-radius: 999px;
+      padding: 5px 11px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .sc-btn.primary { background: var(--blue); color: #fff; }
+    .sc-btn.primary:hover { background: #0077ed; }
+    .sc-btn.ghost { background: rgba(255, 255, 255, 0.09); color: var(--ink-2); }
+    .sc-btn.ghost:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+
+    .sc-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+    }
+    .sc-list::-webkit-scrollbar { width: 4px; }
+    .sc-list::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.14); border-radius: 4px; }
+
+    .sc-empty {
+      margin: auto;
+      text-align: center;
+      padding: 28px 18px;
+      color: var(--ink-3);
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .sc-empty strong {
+      display: block;
+      color: var(--ink-2);
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+
+    .sc-item {
+      padding: 10px 11px;
+      border-radius: 12px;
+      background: var(--bg-card);
+      border: 1px solid rgba(255, 255, 255, 0.07);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .sc-item:hover {
+      background: var(--bg-card-hover);
+      border-color: rgba(255, 255, 255, 0.14);
+    }
+    .sc-item.active {
+      border-color: rgba(41, 151, 255, 0.45);
+      background: rgba(41, 151, 255, 0.08);
+    }
+
+    .sc-item-top {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .sc-ans {
+      font-size: 12.5px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      color: var(--ink);
+      line-height: 1.35;
+      word-break: break-word;
+    }
+    .sc-copy {
+      flex-shrink: 0;
+      font-family: var(--font);
+      font-size: 10px;
+      font-weight: 500;
+      padding: 3px 7px;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--ink-2);
+      cursor: pointer;
+    }
+    .sc-copy:hover { background: rgba(255, 255, 255, 0.15); color: #fff; }
 
     .sc-note {
       margin-top: 5px;
-      font-size: 10.5px;
-      line-height: 1.45;
-      color: #cbd5e1;
+      font-size: 11px;
+      color: var(--ink-2);
+      line-height: 1.4;
+      word-break: break-word;
     }
+
+    .sc-meta {
+      margin-top: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      color: var(--ink-3);
+    }
+
+    .sc-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 13px;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      font-size: 10.5px;
+      color: var(--ink-3);
+    }
+    .sc-check-link {
+      background: none;
+      border: none;
+      color: var(--ink-2);
+      font-family: var(--font);
+      font-size: 10.5px;
+      cursor: pointer;
+    }
+    .sc-check-link:hover { color: var(--blue-hi); }
   </style>
 </head>
 <body>
-  <div id="hud" data-mode="result">
-    <div class="top-strip">
-      <span id="statusDot"></span>
-      <div id="answerViewport">
-        <span id="minimalAnswer"></span>
+  <!-- HUD PILL VIEW -->
+  <div id="hudView" class="view">
+    <div id="pill" class="pill">
+      <span id="pillDot" class="dot"></span>
+      <span id="pillLoader" class="loader" style="display:none;"><i></i><i></i><i></i></span>
+      <span id="pillText" class="pill-text"></span>
+      <span id="pillPin" class="pin-mark" style="display:none;">•</span>
+      <span id="pillMeta" class="pill-meta" style="display:none;"></span>
+    </div>
+  </div>
+
+  <!-- SPOTLIGHT VIEW -->
+  <div id="spotlightView" class="view">
+    <div class="spot-shell">
+      <span id="spotBadge" class="spot-badge">Ask</span>
+      <input id="spotInput" class="spot-input" type="text" autocomplete="off" spellcheck="false" placeholder="Ask anything..." />
+      <span class="spot-kbd">⏎</span>
+    </div>
+  </div>
+
+  <!-- SIDECAR VIEW -->
+  <div id="sidecarView" class="view">
+    <div class="sidecar">
+      <div class="sc-head">
+        <div class="sc-brand">
+          <span class="sc-mark"></span>
+          <span class="sc-title">Companion</span>
+          <span id="scMode" class="sc-mode">Pool</span>
+        </div>
+        <button id="scClose" class="sc-close" type="button" title="Close (Esc)">×</button>
       </div>
-      <span id="metaBadge"></span>
-    </div>
-  </div>
 
-  <div id="snip-layer">
-    <div id="snip-box"></div>
-  </div>
+      <div id="scUpdate" class="sc-update">
+        <div class="sc-update-top">
+          <span id="scUpdateTitle">Update Available</span>
+          <span id="scUpdateVer" style="color:#64d2ff;font-size:10.5px;"></span>
+        </div>
+        <div id="scUpdateSub" class="sc-update-sub">A newer release is ready to install.</div>
+        <div class="sc-update-actions">
+          <button id="scUpdateBtn" class="sc-btn primary" type="button">Download ↗</button>
+          <button id="scUpdateLater" class="sc-btn ghost" type="button">Later</button>
+        </div>
+      </div>
 
-  <div id="spotlight-bar">
-    <span id="spotlightTag">ASK</span>
-    <input
-      id="spotlightInput"
-      type="text"
-      autocomplete="off"
-      spellcheck="false"
-      placeholder="Ask anything or follow up..."
-    />
-    <span id="spotlightHint">Enter</span>
-  </div>
+      <div id="scList" class="sc-list"></div>
 
-  <div id="sidecar-panel">
-    <div class="sidecar-header">
-      <span>Study Notes &amp; History</span>
-      <span class="sidecar-badge">Alt+D</span>
+      <div class="sc-foot">
+        <span id="scVersion">v3.1.0</span>
+        <button id="scCheckUpdate" class="sc-check-link" type="button">Check updates</button>
+      </div>
     </div>
-    <div class="sidecar-keys">
-      Alt+A Scan · Alt+Q Snip · Alt+C Solve · Alt+W Rewrite · Alt+E Explain · Alt+Enter Paste
-    </div>
-    <div id="sidecarList"></div>
   </div>
 
   <script>
-    const hash = window.location.hash;
-    const hudElement = document.getElementById("hud");
-    const snipLayer = document.getElementById("snip-layer");
-    const spotlightBar = document.getElementById("spotlight-bar");
-    const sidecarPanel = document.getElementById("sidecar-panel");
+    const api = window.hud || window.electronAPI || window.api || {};
+    const hash = (window.location.hash || "").replace("#", "").toLowerCase();
 
-    function escapeHtml(str) {
-      const map = { 38: "amp", 60: "lt", 62: "gt", 34: "quot" };
-      return String(str || "").replace(/[&<>"]/g, (ch) => "&" + map[ch.charCodeAt(0)] + ";");
+    const hudView = document.getElementById("hudView");
+    const spotlightView = document.getElementById("spotlightView");
+    const sidecarView = document.getElementById("sidecarView");
+
+    if (hash === "spotlight") {
+      spotlightView.classList.add("active");
+    } else if (hash === "sidecar") {
+      sidecarView.classList.add("active");
+    } else {
+      hudView.classList.add("active");
     }
 
-    if (hash === "#snip") {
-      hudElement.style.display = "none";
-      snipLayer.style.display = "block";
+    // ---------- HUD Pill Renderer ----------
+    const pill = document.getElementById("pill");
+    const pillDot = document.getElementById("pillDot");
+    const pillLoader = document.getElementById("pillLoader");
+    const pillText = document.getElementById("pillText");
+    const pillPin = document.getElementById("pillPin");
+    const pillMeta = document.getElementById("pillMeta");
 
-      let startX = 0;
-      let startY = 0;
-      let isDragging = false;
-      let displayId = null;
-      const selectionBox = document.getElementById("snip-box");
+    function renderHud(data) {
+      if (!data) return;
+      const isLoading = data.mode === "loading";
+      const isError = data.mode === "error";
+      const isUpdate = data.mode === "update";
 
-      window.companion.onSnipInit((data) => {
-        displayId = data && data.displayId ? data.displayId : null;
-      });
+      pill.className = "pill" + (isLoading ? " loading" : isError ? " error" : isUpdate ? " update" : "");
 
-      snipLayer.addEventListener("mousedown", (event) => {
-        isDragging = true;
-        startX = event.clientX;
-        startY = event.clientY;
-        selectionBox.style.display = "block";
-        selectionBox.style.left = startX + "px";
-        selectionBox.style.top = startY + "px";
-        selectionBox.style.width = "0px";
-        selectionBox.style.height = "0px";
-      });
+      if (isLoading) {
+        pillDot.style.display = "none";
+        pillLoader.style.display = "inline-flex";
+        pillText.style.display = "none";
+        pillPin.style.display = "none";
+        pillMeta.style.display = "none";
+        return;
+      }
 
-      window.addEventListener("mousemove", (event) => {
-        if (!isDragging) return;
-        selectionBox.style.left = Math.min(startX, event.clientX) + "px";
-        selectionBox.style.top = Math.min(startY, event.clientY) + "px";
-        selectionBox.style.width = Math.abs(event.clientX - startX) + "px";
-        selectionBox.style.height = Math.abs(event.clientY - startY) + "px";
-      });
+      pillLoader.style.display = "none";
+      pillDot.style.display = "inline-block";
+      pillText.style.display = "inline";
+      pillText.textContent = String(data.cursor_pill || "");
 
-      window.addEventListener("mouseup", (event) => {
-        if (!isDragging) return;
-        isDragging = false;
-        window.companion.completeSnip({
-          x: Math.min(startX, event.clientX),
-          y: Math.min(startY, event.clientY),
-          w: Math.abs(event.clientX - startX),
-          h: Math.abs(event.clientY - startY),
-          displayId,
-        });
-      });
+      let dotClass = "dot";
+      if (isError) dotClass += " error";
+      else if (isUpdate) dotClass += " update";
+      else if (data.key_source === "PRO") dotClass += " pro";
+      else if (data.key_source === "CACHE" || data.key_source === "BYOK_CACHE") dotClass += " cache";
+      else if (data.key_source === "BYOK" || data.key_source === "TEST") dotClass += "";
+      else dotClass += " pool";
+      pillDot.className = dotClass;
 
-      window.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") window.companion.cancelSnip();
-      });
-    } else if (hash === "#spotlight") {
-      hudElement.style.display = "none";
-      spotlightBar.style.display = "flex";
+      pillPin.style.display = data.isPinned ? "inline" : "none";
 
-      const tagEl = document.getElementById("spotlightTag");
-      const inputEl = document.getElementById("spotlightInput");
-      let mode = "ask";
+      const metaParts = [];
+      if (data.elapsed) metaParts.push(String(data.elapsed));
+      if (data.key_source === "CACHE" || data.key_source === "BYOK_CACHE") metaParts.push("⚡");
+      else if (data.key_source === "PRO") metaParts.push("PRO");
 
-      window.companion.onState((state) => {
-        const s = state || {};
-        mode = s.spotlightMode || "ask";
+      if (metaParts.length) {
+        pillMeta.textContent = metaParts.join(" ");
+        pillMeta.style.display = "inline";
+      } else {
+        pillMeta.style.display = "none";
+      }
+    }
 
-        if (mode === "key") {
-          tagEl.textContent = "KEY";
-          inputEl.type = "text";
-          inputEl.placeholder = "Paste key(s): AIza..., gsk_..., nvapi-..., sk-or-...";
-          inputEl.value = s.userApiKey || "";
-        } else if (mode === "followup" && s.hasContext) {
-          tagEl.textContent = "FOLLOW-UP";
-          inputEl.type = "text";
-          inputEl.placeholder = "Ask follow-up on last scan...";
-          inputEl.value = "";
-        } else {
-          tagEl.textContent = "ASK";
-          inputEl.type = "text";
-          inputEl.placeholder = "Ask anything or follow up on last scan...";
-          inputEl.value = "";
-        }
-        setTimeout(() => inputEl.focus(), 20);
-      });
+    // ---------- Spotlight Renderer ----------
+    const spotBadge = document.getElementById("spotBadge");
+    const spotInput = document.getElementById("spotInput");
+    let currentSpotMode = "ask";
 
-      inputEl.addEventListener("keydown", (event) => {
-        if (event.key === "Escape") {
-          window.companion.closeSpotlight();
-          return;
-        }
-        if (event.key !== "Enter" || event.isComposing) return;
-        const val = inputEl.value.trim();
-        if (mode === "key") {
-          window.companion.saveApiKey(val);
+    function renderSpotlight(data) {
+      currentSpotMode = (data && data.spotlightMode) || "ask";
+      spotBadge.className = "spot-badge";
+
+      if (currentSpotMode === "key") {
+        spotBadge.textContent = "API Key";
+        spotBadge.classList.add("key");
+        spotInput.type = "password";
+        spotInput.value = (data && data.userApiKey) || "";
+        spotInput.placeholder = "Paste free key (gsk_ / AIza) or share:<KEY> • Empty = Cloud Pool";
+      } else if (currentSpotMode === "followup") {
+        spotBadge.textContent = "Follow-Up";
+        spotBadge.classList.add("followup");
+        spotInput.type = "text";
+        spotInput.value = "";
+        spotInput.placeholder = data && data.hasContext
+          ? "Ask why, request steps, or verify last answer..."
+          : "Ask any question...";
+      } else {
+        spotBadge.textContent = "Ask";
+        spotInput.type = "text";
+        spotInput.value = "";
+        spotInput.placeholder = "Ask anything or paste a question...";
+      }
+
+      setTimeout(() => {
+        spotInput.focus();
+        spotInput.select();
+      }, 15);
+    }
+
+    spotInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (api.closeSpotlight) api.closeSpotlight();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        const val = spotInput.value.trim();
+        if (currentSpotMode === "key") {
+          if (api.saveApiKey) api.saveApiKey(val);
         } else if (val) {
-          window.companion.sendSpotlightQuery(val);
+          if (currentSpotMode === "followup" && api.sendFollowup) api.sendFollowup(val);
+          else if (api.sendSpotlightQuery) api.sendSpotlightQuery(val);
         }
-      });
-    } else if (hash === "#sidecar") {
-      hudElement.style.display = "none";
-      sidecarPanel.style.display = "flex";
+      }
+    });
 
-      const listEl = document.getElementById("sidecarList");
+    // ---------- Sidecar Renderer ----------
+    const scMode = document.getElementById("scMode");
+    const scList = document.getElementById("scList");
+    const scClose = document.getElementById("scClose");
+    const scUpdate = document.getElementById("scUpdate");
+    const scUpdateVer = document.getElementById("scUpdateVer");
+    const scUpdateSub = document.getElementById("scUpdateSub");
+    const scUpdateBtn = document.getElementById("scUpdateBtn");
+    const scUpdateLater = document.getElementById("scUpdateLater");
+    const scVersion = document.getElementById("scVersion");
+    const scCheckUpdate = document.getElementById("scCheckUpdate");
+    let currentUpdateVersion = "";
 
-      window.companion.onState((state) => {
-        const s = state || {};
-        const items = s.history || [];
-        const activeIdx = s.activeIdx || 0;
+    scClose.onclick = () => { if (api.closeSidecar) api.closeSidecar(); };
+    scUpdateBtn.onclick = () => { if (api.openUpdate) api.openUpdate(); };
+    scUpdateLater.onclick = () => {
+      scUpdate.classList.remove("visible");
+      if (api.dismissUpdate && currentUpdateVersion) api.dismissUpdate(currentUpdateVersion);
+    };
+    scCheckUpdate.onclick = () => {
+      scCheckUpdate.textContent = "Checking...";
+      if (api.checkUpdate) api.checkUpdate();
+      setTimeout(() => { scCheckUpdate.textContent = "Check updates"; }, 2500);
+    };
 
-        if (!items.length) {
-          listEl.innerHTML =
-            '<div class="sc-card"><div class="sc-note">No scans yet. Press Alt+A, Alt+Q, or Alt+C to start.</div></div>';
-          return;
-        }
+    function renderSidecar(data) {
+      if (!data) return;
+      scMode.textContent = data.hasUserKey ? "BYOK" : "Cloud Pool";
+      if (data.appVersion) scVersion.textContent = "v" + String(data.appVersion);
 
-        listEl.innerHTML = items
-          .map((item, idx) => {
-            const activeCls = idx === activeIdx ? "active" : "";
-            const badge =
-              item.key_source === "BYOK" ? "🔑 " :
-              item.key_source === "BYOK_CACHE" ? "🔑⚡ " :
-              item.key_source === "CACHE" ? "⚡ " :
-              item.key_source === "TEST" ? "🧪 " :
-              (item.key_source === "POOL" || item.key_source === "POOL_CACHE") ? "☁ " : "";
-            const noteHtml = item.expanded_note
-              ? `<div class="sc-note">${escapeHtml(item.expanded_note)}</div>`
-              : "";
-            return `
-              <div class="sc-card ${activeCls}">
-                <div class="sc-top">
-                  <span class="sc-pill">${escapeHtml(item.cursor_pill || "")}</span>
-                  <span class="sc-meta">${badge}${escapeHtml(item.elapsed || "")}</span>
-                </div>
-                ${noteHtml}
-              </div>
-            `;
-          })
-          .join("");
-      });
-    } else {
-      const viewport = document.getElementById("answerViewport");
-      const answer = document.getElementById("minimalAnswer");
-      const metaBadge = document.getElementById("metaBadge");
-      let textAnimation = null;
-
-      function stopTextAnimation() {
-        if (textAnimation) {
-          textAnimation.cancel();
-          textAnimation = null;
-        }
-        answer.style.transform = "translateX(0)";
+      if (data.updateInfo && data.updateInfo.available && !data.updateInfo.dismissed) {
+        currentUpdateVersion = String(data.updateInfo.version || "");
+        scUpdateVer.textContent = "v" + currentUpdateVersion;
+        scUpdateSub.textContent = data.updateInfo.notice || "New features & stability improvements ready.";
+        scUpdate.classList.add("visible");
+      } else {
+        scUpdate.classList.remove("visible");
       }
 
-      function fitAnswer() {
-        stopTextAnimation();
-        const overflow = answer.scrollWidth - viewport.clientWidth;
-        if (overflow <= 1 || hudElement.dataset.mode === "loading") return;
+      const items = Array.isArray(data.history) ? data.history : [];
+      scList.textContent = "";
 
-        const travelMs = Math.max(2000, (overflow / 32) * 1000);
-        const pauseMs = 1600;
-        const totalMs = travelMs * 2 + pauseMs * 2;
-
-        textAnimation = answer.animate(
-          [
-            { transform: "translateX(0)", offset: 0 },
-            { transform: "translateX(0)", offset: pauseMs / totalMs },
-            { transform: `translateX(-${overflow}px)`, offset: (pauseMs + travelMs) / totalMs },
-            { transform: `translateX(-${overflow}px)`, offset: (pauseMs * 2 + travelMs) / totalMs },
-            { transform: "translateX(0)", offset: 1 },
-          ],
-          { duration: totalMs, iterations: Infinity, easing: "linear" }
-        );
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "sc-empty";
+        const strong = document.createElement("strong");
+        strong.textContent = "Ready when you are";
+        const sub = document.createElement("span");
+        sub.textContent = "Press F8 to scan, F9 for 2-corner snip, or Alt+C on highlighted text.";
+        empty.appendChild(strong);
+        empty.appendChild(sub);
+        scList.appendChild(empty);
+        return;
       }
 
-      window.companion.onState((state) => {
-        const s = state || {};
-        hudElement.dataset.mode =
-          s.mode === "loading"
-            ? "loading"
-            : s.mode === "error"
-              ? "error"
-              : "result";
+      items.forEach((item, idx) => {
+        const card = document.createElement("div");
+        card.className = "sc-item" + (idx === data.activeIdx ? " active" : "");
+        card.onclick = () => { if (api.selectHistory) api.selectHistory(idx); };
 
-        answer.textContent = s.mode === "loading" ? "•••" : (s.cursor_pill || "");
+        const top = document.createElement("div");
+        top.className = "sc-item-top";
 
-        const keyTag =
-          s.key_source === "BYOK" ? "🔑 " :
-          s.key_source === "BYOK_CACHE" ? "🔑⚡ " :
-          s.key_source === "CACHE" ? "⚡ " :
-          s.key_source === "TEST" ? "🧪 " :
-          (s.key_source === "POOL" || s.key_source === "POOL_CACHE") ? "☁ " : "";
-        metaBadge.textContent =
-          s.mode === "loading" ? "" : `${keyTag}${s.elapsed || ""}`.trim();
+        const ans = document.createElement("div");
+        ans.className = "sc-ans";
+        ans.textContent = String(item.cursor_pill || "");
 
-        requestAnimationFrame(fitAnswer);
+        const copyBtn = document.createElement("button");
+        copyBtn.className = "sc-copy";
+        copyBtn.type = "button";
+        copyBtn.textContent = "Copy";
+        copyBtn.onclick = (e) => {
+          e.stopPropagation();
+          const val = String(item.copy_value || item.cursor_pill || "");
+          if (api.copyText && val) api.copyText(val);
+          copyBtn.textContent = "Copied";
+          setTimeout(() => { copyBtn.textContent = "Copy"; }, 1200);
+        };
+
+        top.appendChild(ans);
+        top.appendChild(copyBtn);
+        card.appendChild(top);
+
+        if (item.expanded_note) {
+          const note = document.createElement("div");
+          note.className = "sc-note";
+          note.textContent = String(item.expanded_note);
+          card.appendChild(note);
+        }
+
+        const meta = document.createElement("div");
+        meta.className = "sc-meta";
+        const src = document.createElement("span");
+        src.textContent = String(item.sourceLabel || "").slice(0, 28);
+        const timing = document.createElement("span");
+        timing.textContent = [item.key_source || "POOL", item.elapsed || ""].filter(Boolean).join(" · ");
+        meta.appendChild(src);
+        meta.appendChild(timing);
+        card.appendChild(meta);
+
+        scList.appendChild(card);
       });
+    }
 
-      window.addEventListener("resize", fitAnswer);
+    if (api.onState) {
+      api.onState((data) => {
+        if (hash === "spotlight") renderSpotlight(data);
+        else if (hash === "sidecar") renderSidecar(data);
+        else renderHud(data);
+      });
     }
   </script>
 </body>

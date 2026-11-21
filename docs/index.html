@@ -290,7 +290,7 @@
   <main>
     <header class="hero">
       <div class="wrap">
-        <p class="eyebrow">Cursor Companion v3.1.1</p>
+        <p class="eyebrow" id="heroVersion">Cursor Companion v3.1.1</p>
         <h1>Instant Answers at Your Cursor.<span class="h1-sub">Built by a Student. Free for Students.</span></h1>
         <p class="lede">
           A lightweight Windows AI overlay for study, practice, and coding. It never steals window focus, lets you customize every hotkey, and stays free to use with your own API key.
@@ -635,13 +635,38 @@
       els.forEach((el) => io.observe(el));
     })();
 
-    // ---------- Engine status ----------
+    // ---------- Auto-sync latest version from GitHub Releases ----------
+    (function syncLatestRelease() {
+      fetch("https://api.github.com/repos/burhanuddinkhandwala786/cursor-companion/releases/latest", {
+        headers: { Accept: "application/vnd.github+json" },
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((rel) => {
+          if (!rel || !rel.tag_name) return;
+          const ver = String(rel.tag_name).trim().replace(/^v/i, "");
+          if (!ver) return;
+          const eyebrow = document.getElementById("heroVersion");
+          if (eyebrow) eyebrow.textContent = `Cursor Companion v${ver}`;
+          document.title = `Cursor Companion v${ver} — Free AI Overlay for Students`;
+          const sub = encodeURIComponent(`Cursor Companion v${ver} Feedback`);
+          document.getElementById("gmailWebBtn").href =
+            `https://mail.google.com/mail/?view=cm&fs=1&to=${emailEnc}&su=${sub}`;
+          document.getElementById("mailtoAppBtn").href =
+            `mailto:${SITE_CONFIG.developerEmail}?subject=${sub}`;
+        })
+        .catch(() => {});
+    })();
+
+    // ---------- Engine status (handles Render cold starts up to 75s) ----------
     (function checkEngine(attempt = 0) {
       const badge = document.getElementById("statusBadge");
       const text = document.getElementById("statusText");
 
       fetch("https://study-buddy-brain.onrender.com/healthz", { cache: "no-store" })
-        .then((res) => res.json())
+        .then((res) => {
+          if (!res.ok) throw new Error("Booting");
+          return res.json();
+        })
         .then((data) => {
           if (data && data.status === "ok") {
             badge.dataset.state = "online";
@@ -652,9 +677,9 @@
         })
         .catch(() => {
           badge.dataset.state = "waking";
-          text.textContent = "Cloud Waking Up...";
-          if (attempt < 8) {
-            setTimeout(() => checkEngine(attempt + 1), 6000);
+          text.textContent = attempt < 15 ? "Cloud Waking Up..." : "Cloud Standby";
+          if (attempt < 15) {
+            setTimeout(() => checkEngine(attempt + 1), 5000);
           }
         });
     })();

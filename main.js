@@ -20,6 +20,8 @@ const crypto = require("crypto");
 const { execFile } = require("child_process");
 
 const BACKEND_URL = "https://study-buddy-brain.onrender.com";
+const GITHUB_RELEASES_API =
+  "https://api.github.com/repos/burhanuddinkhandwala786/cursor-companion/releases/latest";
 
 let SETTINGS_PATH = "";
 let PACKS_PATH = "";
@@ -43,15 +45,15 @@ let snipCornerTimer = null;
 let escRegistered = false;
 let hideTimer = null;
 let followTimer = null;
-let keepAliveTimer = null;
+let updateCheckTimer = null;
 let pendingHudState = null;
 
 let history = [];
 let historyIdx = -1;
 let lastContextSummary = "";
 let lastGoodByok = null;
-let lockedW = 54;
-let lockedH = 24;
+let lockedW = 62;
+let lockedH = 30;
 let lastWinX = -9999;
 let lastWinY = -9999;
 
@@ -112,6 +114,8 @@ let settings = {
   activePack: "default",
   deviceId: crypto.randomUUID(),
   shortcuts: { ...DEFAULT_SHORTCUTS },
+  notifiedVersion: "",
+  dismissedUpdateVersion: "",
 };
 
 const DEFAULT_BYOK_MODELS = {
@@ -327,6 +331,8 @@ function loadSettings() {
         ? saved.deviceId
         : crypto.randomUUID(),
     shortcuts: sanitizeShortcutsMap(saved.shortcuts),
+    notifiedVersion: typeof saved.notifiedVersion === "string" ? saved.notifiedVersion : "",
+    dismissedUpdateVersion: typeof saved.dismissedUpdateVersion === "string" ? saved.dismissedUpdateVersion : "",
   };
 }
 
@@ -344,6 +350,8 @@ function saveSettings(next) {
       activePack: settings.activePack,
       deviceId: settings.deviceId,
       shortcuts: settings.shortcuts,
+      notifiedVersion: settings.notifiedVersion || "",
+      dismissedUpdateVersion: settings.dismissedUpdateVersion || "",
       userApiKeyEnc: encryptedFields.userApiKeyEnc,
       ...(encryptedFields.userApiKey ? { userApiKey: encryptedFields.userApiKey } : {}),
     };
@@ -352,6 +360,10 @@ function saveSettings(next) {
   } catch (error) {
     console.error("Unable to save settings:", error.message);
   }
+}
+
+function cleanVersionString(v) {
+  return String(v || "").trim().replace(/^v/i, "").split("-")[0];
 }
 
 function mergeRemoteConfig(data) {
@@ -364,13 +376,14 @@ function mergeRemoteConfig(data) {
       }
     }
   }
+  const nextVer = typeof data.latest_version === "string" ? cleanVersionString(data.latest_version) : "";
   remoteConfig = {
-    latest_version: typeof data.latest_version === "string" ? data.latest_version.trim() : remoteConfig.latest_version,
+    latest_version: nextVer || remoteConfig.latest_version,
     release_url:
       typeof data.release_url === "string" && data.release_url.startsWith("https://")
         ? data.release_url.trim()
         : remoteConfig.release_url,
-    notice: typeof data.notice === "string" ? data.notice.trim() : "",
+    notice: typeof data.notice === "string" ? data.notice.trim() : remoteConfig.notice,
     byok_models: mergedModels,
   };
 }
@@ -390,9 +403,11 @@ function getByokModels(slot) {
 }
 
 function isNewerVersion(remoteVer, currentVer) {
-  if (!remoteVer || !currentVer) return false;
-  const rParts = String(remoteVer).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
-  const cParts = String(currentVer).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  const rClean = cleanVersionString(remoteVer);
+  const cClean = cleanVersionString(currentVer);
+  if (!rClean || !cClean) return false;
+  const rParts = rClean.split(".").map((n) => parseInt(n, 10) || 0);
+  const cParts = cClean.split(".").map((n) => parseInt(n, 10) || 0);
   for (let i = 0; i < Math.max(rParts.length, cParts.length); i++) {
     const r = rParts[i] || 0;
     const c = cParts[i] || 0;
@@ -400,6 +415,20 @@ function isNewerVersion(remoteVer, currentVer) {
     if (r < c) return false;
   }
   return false;
+}
+
+function getUpdateInfo() {
+  const currentVersion = cleanVersionString(app.getVersion() || "3.1.0");
+  const latest = cleanVersionString(remoteConfig.latest_version || "");
+  const available = isNewerVersion(latest, currentVersion);
+  return {
+    available,
+    version: latest,
+    currentVersion,
+    url: remoteConfig.release_url,
+    notice: remoteConfig.notice || "",
+    dismissed: Boolean(available && settings.dismissedUpdateVersion === latest),
+  };
 }
 
 function hardenWindow(win) {
@@ -448,7 +477,6 @@ function clearSnipCorner() {
   snipCornerTimer = null;
 }
 
-// Alt+X / Esc: Vanishes overlays immediately without cancelling in-flight scans or blocking the incoming answer
 function hideOverlaysOnly() {
   clearTimeout(hideTimer);
   stopCursorFollow();
@@ -460,7 +488,6 @@ function hideOverlaysOnly() {
   syncEscapeShortcut();
 }
 
-// F10 (customizable): Hard cancel & full reset of any stuck scan or 2-corner snip
 function forceResetAll() {
   isPinned = false;
   activeRequestId += 1;
@@ -542,11 +569,22 @@ function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 11000) {
   });
 }
 
-function httpsGetJson(urlStr, timeoutMs = 10000) {
+function httpsGetJson(urlStr, timeoutMs = 9000) {
   return new Promise((resolve, reject) => {
+    const url = new URL(urlStr);
     const req = https.get(
-      urlStr,
-      { agent: false, family: 4, timeout: timeoutMs },
+      {
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+        agent: false,
+        family: 4,
+        timeout: timeoutMs,
+        headers: {
+          "User-Agent": "Cursor-Companion-Desktop",
+          Accept: "application/json",
+        },
+      },
       (res) => {
         let data = "";
         res.setEncoding("utf8");
@@ -571,20 +609,69 @@ function httpsGetJson(urlStr, timeoutMs = 10000) {
   });
 }
 
-async function syncRemoteConfig() {
+// Dual-source fail-safe sync: checks Render /v3_1/config AND falls back to GitHub Releases API
+async function syncRemoteConfigAndUpdates(manual = false) {
+  let fetched = false;
+
   try {
-    const data = await httpsGetJson(BACKEND_URL + "/v3_1/config", 10000);
+    const data = await httpsGetJson(BACKEND_URL + "/v3_1/config", 9000);
     if (data && typeof data === "object") {
       mergeRemoteConfig(data);
-      if (REMOTE_CONFIG_PATH) {
-        try {
-          fs.mkdirSync(path.dirname(REMOTE_CONFIG_PATH), { recursive: true });
-          fs.writeFileSync(REMOTE_CONFIG_PATH, JSON.stringify(remoteConfig, null, 2), "utf8");
-        } catch (_) {}
-      }
-      rebuildTrayMenu();
+      fetched = true;
     }
   } catch (_) {}
+
+  // Fail-safe fallback to GitHub Releases API if Render is sleeping or older
+  try {
+    const gh = await httpsGetJson(GITHUB_RELEASES_API, 8000);
+    if (gh && typeof gh === "object" && gh.tag_name) {
+      const ghVer = cleanVersionString(gh.tag_name);
+      if (isNewerVersion(ghVer, remoteConfig.latest_version || app.getVersion() || "3.1.0")) {
+        mergeRemoteConfig({
+          latest_version: ghVer,
+          release_url:
+            typeof gh.html_url === "string" && gh.html_url.startsWith("https://")
+              ? gh.html_url
+              : remoteConfig.release_url,
+        });
+      }
+      fetched = true;
+    }
+  } catch (_) {}
+
+  if (fetched && REMOTE_CONFIG_PATH) {
+    try {
+      fs.mkdirSync(path.dirname(REMOTE_CONFIG_PATH), { recursive: true });
+      fs.writeFileSync(REMOTE_CONFIG_PATH, JSON.stringify(remoteConfig, null, 2), "utf8");
+    } catch (_) {}
+  }
+
+  rebuildTrayMenu();
+  syncSidecar();
+
+  const info = getUpdateInfo();
+  if (info.available) {
+    if (manual || (settings.notifiedVersion !== info.version && !isBusy)) {
+      saveSettings({ notifiedVersion: info.version });
+      showHud(
+        {
+          mode: "update",
+          cursor_pill: `↑ v${info.version} ready · Press Alt+D or Tray to update`,
+          elapsed: "NEW",
+        },
+        5500
+      );
+    }
+  } else if (manual) {
+    showHud(
+      {
+        mode: "result",
+        cursor_pill: `Up to date (v${info.currentVersion}) ✓`,
+        elapsed: "✓",
+      },
+      2600
+    );
+  }
 }
 
 function parseModelJsonResponse(rawText) {
@@ -947,25 +1034,10 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
   throw new Error("Request failed");
 }
 
-function warmBackend() {
-  try {
-    const req = https.get(
-      BACKEND_URL + "/healthz",
-      { agent: false, family: 4, timeout: 10000 },
-      (res) => {
-        res.on("error", () => {});
-        res.resume();
-      }
-    );
-    req.on("timeout", () => req.destroy());
-    req.on("error", () => {});
-  } catch (_) {}
-}
-
 function createHudWindow() {
   const win = new BrowserWindow({
-    width: 54,
-    height: 24,
+    width: 62,
+    height: 30,
     useContentSize: true,
     frame: false,
     transparent: true,
@@ -1018,11 +1090,11 @@ function snapToCursor(force = false) {
   const disp = screen.getDisplayNearestPoint(pt);
   const wa = disp.workArea;
 
-  let x = pt.x + 12;
-  let y = pt.y + 12;
+  let x = pt.x + 14;
+  let y = pt.y + 14;
 
-  if (x + lockedW > wa.x + wa.width - 6) x = pt.x - lockedW - 10;
-  if (y + lockedH > wa.y + wa.height - 6) y = pt.y - lockedH - 10;
+  if (x + lockedW > wa.x + wa.width - 6) x = pt.x - lockedW - 12;
+  if (y + lockedH > wa.y + wa.height - 6) y = pt.y - lockedH - 12;
 
   x = Math.round(Math.max(wa.x + 4, Math.min(x, wa.x + wa.width - lockedW - 4)));
   y = Math.round(Math.max(wa.y + 4, Math.min(y, wa.y + wa.height - lockedH - 4)));
@@ -1062,14 +1134,15 @@ function showHud(payload, autoHideMs = 0) {
     payload.key_source === "BYOK" ||
     payload.key_source === "BYOK_CACHE" ||
     payload.key_source === "CACHE" ||
-    payload.key_source === "PRO"
-      ? 72
-      : 58;
+    payload.key_source === "PRO" ||
+    payload.mode === "update"
+      ? 86
+      : 68;
 
   lockedW = isLoading
-    ? 54
-    : Math.max(126, Math.min(360, Math.round(textLen * 7.5 + badgeReserve)));
-  lockedH = 24;
+    ? 62
+    : Math.max(132, Math.min(410, Math.round(textLen * 7.6 + badgeReserve)));
+  lockedH = 30;
 
   hudWin.setFocusable(false);
   hudWin.setIgnoreMouseEvents(true, { forward: true });
@@ -1129,10 +1202,10 @@ function openSpotlight(initialMode = "ask") {
   const pt = screen.getCursorScreenPoint();
   const wa = screen.getDisplayNearestPoint(pt).workArea;
 
-  const width = 440;
-  const height = 44;
+  const width = 480;
+  const height = 56;
   const x = Math.round(wa.x + (wa.width - width) / 2);
-  const y = Math.round(wa.y + 42);
+  const y = Math.round(wa.y + 48);
 
   const state = {
     spotlightMode: initialMode,
@@ -1224,9 +1297,9 @@ function toggleSidecar() {
   const pt = screen.getCursorScreenPoint();
   const wa = screen.getDisplayNearestPoint(pt).workArea;
 
-  const width = 276;
-  const height = Math.max(1, Math.min(480, wa.height - 48));
-  const x = Math.round(wa.x + wa.width - width - 12);
+  const width = 296;
+  const height = Math.max(1, Math.min(520, wa.height - 48));
+  const x = Math.round(wa.x + wa.width - width - 14);
   const y = Math.round(wa.y + 24);
 
   if (sidecarWin && !sidecarWin.isDestroyed()) {
@@ -1303,11 +1376,13 @@ function syncSidecar() {
       history,
       activeIdx: historyIdx,
       hasUserKey: Boolean(settings.userApiKey),
+      appVersion: cleanVersionString(app.getVersion() || "3.1.0"),
+      updateInfo: getUpdateInfo(),
     });
   }
 }
 
-// --- Built-in GUI Shortcut Customizer ---
+// --- Built-in GUI Shortcut Customizer (Matching Obsidian / Apple / Omega Theme) ---
 function ensureShortcutEditorAssets() {
   const preloadCode = [
     'const { contextBridge, ipcRenderer } = require("electron");',
@@ -1322,27 +1397,30 @@ function ensureShortcutEditorAssets() {
   const editorHtml = [
     "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Customize Shortcuts</title>",
     "<style>",
-    "*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}",
-    "body{background:#0b1020;color:#eef2ff;padding:18px;user-select:none}",
-    "h2{font-size:16px;margin-bottom:4px}",
-    ".sub{font-size:12px;color:#94a3b8;margin-bottom:14px}",
-    ".list{max-height:370px;overflow-y:auto;border:1px solid rgba(255,255,255,0.1);border-radius:10px;background:#11182c}",
-    ".row{display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-bottom:1px solid rgba(255,255,255,0.06);gap:10px}",
+    "*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI Variable','Segoe UI',sans-serif}",
+    "body{background:#000;color:#f5f5f7;padding:22px 20px;user-select:none;-webkit-font-smoothing:antialiased}",
+    "h2{font-size:17px;font-weight:700;letter-spacing:-0.03em;margin-bottom:4px}",
+    ".sub{font-size:12px;color:#86868b;margin-bottom:16px}",
+    ".list{max-height:366px;overflow-y:auto;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:#161617}",
+    ".list::-webkit-scrollbar{width:5px}.list::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.16);border-radius:5px}",
+    ".row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.08);gap:10px}",
     ".row:last-child{border-bottom:none}",
-    ".lbl{font-size:12.5px;color:#dbeafe}",
+    ".lbl{font-size:12.5px;color:#d2d2d7;letter-spacing:-0.01em}",
     ".ctrl{display:flex;align-items:center;gap:6px}",
-    ".keybtn{min-width:130px;padding:5px 10px;border-radius:7px;border:1px solid rgba(255,255,255,0.18);background:#1e293b;color:#f8fafc;font-size:12px;font-weight:600;cursor:pointer;text-align:center}",
-    ".keybtn.rec{border-color:#22d3ee;background:#0e7490;color:#fff}",
-    ".keybtn.clash{border-color:#f87171;color:#fecaca}",
-    ".clr{padding:4px 8px;border-radius:6px;border:1px solid rgba(255,255,255,0.12);background:transparent;color:#94a3b8;font-size:11px;cursor:pointer}",
+    ".keybtn{min-width:130px;height:30px;padding:0 11px;border-radius:9px;border:1px solid rgba(255,255,255,0.14);background:linear-gradient(180deg,#3a3a3c,#2a2a2c);box-shadow:0 2px 0 #0a0a0a,inset 0 1px 0 rgba(255,255,255,0.12);color:#f5f5f7;font-size:12px;font-weight:600;cursor:pointer;text-align:center}",
+    ".keybtn.rec{border-color:#2997ff;background:#0071e3;color:#fff;box-shadow:0 0 12px rgba(41,151,255,0.45)}",
+    ".keybtn.clash{border-color:rgba(255,159,10,0.65);color:#ffd60a}",
+    ".clr{height:28px;padding:0 9px;border-radius:980px;border:1px solid rgba(255,255,255,0.12);background:transparent;color:#86868b;font-size:11px;cursor:pointer}",
     ".clr:hover{color:#fff;border-color:rgba(255,255,255,0.3)}",
-    ".bar{display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:8px}",
-    ".btn{padding:8px 14px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:#1e293b;color:#fff;font-size:12.5px;font-weight:600;cursor:pointer}",
-    ".btn.primary{background:#4f46e5;border-color:#6366f1}",
-    ".msg{font-size:12px;color:#6ee7b7;min-height:16px;margin-top:8px}",
+    ".bar{display:flex;justify-content:space-between;align-items:center;margin-top:16px;gap:8px}",
+    ".btn{padding:9px 16px;border-radius:980px;border:1px solid rgba(255,255,255,0.14);background:#1c1c1e;color:#f5f5f7;font-size:12.5px;font-weight:500;cursor:pointer}",
+    ".btn:hover{background:#2c2c2e}",
+    ".btn.primary{background:#0071e3;border-color:#0071e3;color:#fff}",
+    ".btn.primary:hover{background:#0077ed}",
+    ".msg{font-size:12px;color:#30d158;min-height:17px;margin-top:10px}",
     "</style></head><body>",
-    "<h2>Customize Global Shortcuts</h2>",
-    "<div class='sub'>Click any shortcut box, then press your desired key combo. Click Clear to disable a clashing hotkey.</div>",
+    "<h2>Customize Shortcuts</h2>",
+    "<div class='sub'>Click any keycap, then press your combo. Click Clear to disable a clashing hotkey.</div>",
     "<div class='list' id='list'></div>",
     "<div class='msg' id='msg'></div>",
     "<div class='bar'>",
@@ -1379,7 +1457,7 @@ function ensureShortcutEditorAssets() {
     "}",
     "function render() {",
     "  const list = document.getElementById('list');",
-    "  list.innerHTML = '';",
+    "  list.textContent = '';",
     "  labels.forEach(([id, title]) => {",
     "    const row = document.createElement('div'); row.className = 'row';",
     "    const lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = title;",
@@ -1405,7 +1483,7 @@ function ensureShortcutEditorAssets() {
     "document.getElementById('saveBtn').onclick = async () => {",
     "  const res = await window.shortcutApi.save(state);",
     "  state = res.shortcuts; failed = new Set(res.failed || []);",
-    "  document.getElementById('msg').textContent = failed.size ? 'Saved — red items clashed with another app.' : 'Shortcuts saved & active!';",
+    "  document.getElementById('msg').textContent = failed.size ? 'Saved — highlighted items clashed with another app.' : 'Shortcuts saved and active.';",
     "  render();",
     "};",
     "document.getElementById('resetBtn').onclick = async () => {",
@@ -1437,13 +1515,13 @@ function openShortcutEditor() {
 
   const win = new BrowserWindow({
     width: 520,
-    height: 520,
+    height: 530,
     resizable: false,
     minimizable: false,
     maximizable: false,
     alwaysOnTop: true,
     title: "Cursor Companion — Customize Shortcuts",
-    backgroundColor: "#0b1020",
+    backgroundColor: "#000000",
     autoHideMenuBar: true,
     webPreferences: {
       preload: SHORTCUT_PRELOAD_PATH,
@@ -1549,7 +1627,6 @@ async function captureBetweenPointsBuffer(p1, p2) {
   return image.crop({ x, y, width: w, height: h }).toJPEG(80);
 }
 
-// Guaranteed Ctrl-safe text grabber: NEVER kills PowerShell mid-keystroke; always releases Ctrl in finally{}
 function grabSelectedTextDirectly() {
   if (process.platform !== "win32") {
     return Promise.resolve("");
@@ -1595,7 +1672,6 @@ try {
       if (settled) return;
       settled = true;
       clearInterval(poll);
-      // Small 35ms settle ensures PowerShell's finally{} has released Ctrl before restoring previous clipboard
       setTimeout(() => {
         try {
           clipboard.writeText(prev);
@@ -1783,7 +1859,7 @@ async function handleTwoCornerSnip() {
       {
         mode: "result",
         detected_type: "DIRECT_VALUE",
-        cursor_pill: "⌜ Corner 1 set → press Snip at bottom-right",
+        cursor_pill: "Corner 1 set · tap bottom-right",
         elapsed: "1/2",
       },
       6000
@@ -1838,7 +1914,6 @@ async function handleTextAction(actionMode = "solve") {
         actionMode,
       });
     } else {
-      // Upward bias (0.58) centers the question the cursor just finished highlighting instead of the question below
       const buf = await captureAroundCursorBuffer(960, 680, false, 0.58);
       if (activeRequestId !== reqId) return;
       sourceLabel = `[Cursor ${actionMode} Scan]`;
@@ -1902,7 +1977,6 @@ function handleResult(res, elapsed, sourceContext) {
   if (history.length > 15) history.pop();
   historyIdx = 0;
 
-  // Always show the finished answer pill at cursor even if Alt+X hid the loading dots
   showHud(item, 8500);
   syncSidecar();
 }
@@ -2081,6 +2155,24 @@ ipcMain.on("hud-close-sidecar", () => {
 
 ipcMain.on("hud-hide", hideOverlaysOnly);
 
+ipcMain.on("hud-open-update", () => {
+  const info = getUpdateInfo();
+  if (info.url && info.url.startsWith("https://")) {
+    shell.openExternal(info.url);
+  }
+});
+
+ipcMain.on("hud-dismiss-update", (_event, ver) => {
+  if (typeof ver === "string" && ver.trim()) {
+    saveSettings({ dismissedUpdateVersion: cleanVersionString(ver) });
+    syncSidecar();
+  }
+});
+
+ipcMain.on("hud-check-update", () => {
+  syncRemoteConfigAndUpdates(true);
+});
+
 ipcMain.handle("shortcuts-get", () => ({
   shortcuts: settings.shortcuts,
   labels: SHORTCUT_LABELS,
@@ -2140,7 +2232,6 @@ function getActionHandlers() {
         if (hudWin.isVisible()) startCursorFollow();
       }
     },
-    // Pressing Alt+H while hidden immediately re-shows the latest answer right at cursor
     cycleHistory: () => {
       if (!history.length) return;
       const visible = hudWin && !hudWin.isDestroyed() && hudWin.isVisible();
@@ -2194,8 +2285,7 @@ function fmtKey(id) {
 function rebuildTrayMenu() {
   if (!tray) return;
 
-  const currentVersion = app.getVersion() || "3.1.0";
-  const hasUpdate = isNewerVersion(remoteConfig.latest_version, currentVersion);
+  const info = getUpdateInfo();
 
   const packSubmenu = Object.entries(modePacks).map(([id, pack]) => ({
     label: pack.label || id,
@@ -2218,19 +2308,19 @@ function rebuildTrayMenu() {
   }));
 
   const template = [
-    { label: `Cursor Companion v${currentVersion}`, enabled: false },
+    { label: `Cursor Companion v${info.currentVersion}`, enabled: false },
   ];
 
-  if (hasUpdate) {
+  if (info.available) {
     template.push({
-      label: `⬇ Update Available (v${remoteConfig.latest_version})`,
-      click: () => shell.openExternal(remoteConfig.release_url),
+      label: `⬇ Download Update (v${info.version})`,
+      click: () => shell.openExternal(info.url),
     });
   }
 
-  if (remoteConfig.notice) {
+  if (info.notice) {
     template.push({
-      label: `ℹ ${remoteConfig.notice.slice(0, 48)}`,
+      label: `ℹ ${info.notice.slice(0, 48)}`,
       enabled: false,
     });
   }
@@ -2258,6 +2348,7 @@ function rebuildTrayMenu() {
     { label: `Vanish Overlay (${fmtKey("hideOnly")})`, click: () => hideOverlaysOnly() },
     { label: `Force Cancel / Reset (${fmtKey("forceReset")})`, click: () => forceResetAll() },
     { type: "separator" },
+    { label: "Check for Updates...", click: () => syncRemoteConfigAndUpdates(true) },
     { label: "Quit", click: () => app.quit() }
   );
 
@@ -2267,7 +2358,7 @@ function rebuildTrayMenu() {
 function createTray() {
   const icon = nativeImage.createEmpty();
   tray = new Tray(icon);
-  tray.setToolTip("Cursor Companion V3.1");
+  tray.setToolTip("Cursor Companion");
   rebuildTrayMenu();
 }
 
@@ -2287,9 +2378,10 @@ if (!gotSingleInstanceLock) {
       createHudWindow();
       registerAllShortcuts();
       createTray();
-      syncRemoteConfig();
 
-      //keepAliveTimer = setInterval(warmBackend, 240000);
+      // Silent startup check (4s delay so launch is instant) + once every 6 hours (zero server spam)
+      setTimeout(() => syncRemoteConfigAndUpdates(false), 4000);
+      updateCheckTimer = setInterval(() => syncRemoteConfigAndUpdates(false), 6 * 60 * 60 * 1000);
     })
     .catch((error) => {
       console.error("Application startup failed:", error);
@@ -2301,7 +2393,7 @@ app.on("will-quit", () => {
   clearTimeout(hideTimer);
   clearTimeout(busyWatchdog);
   clearTimeout(snipCornerTimer);
-  clearInterval(keepAliveTimer);
+  clearInterval(updateCheckTimer);
   stopCursorFollow();
   globalShortcut.unregisterAll();
 });

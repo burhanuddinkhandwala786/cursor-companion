@@ -9,6 +9,8 @@ const {
   Tray,
   Menu,
   nativeImage,
+  shell,
+  safeStorage,
 } = require("electron");
 
 const path = require("path");
@@ -18,44 +20,160 @@ const crypto = require("crypto");
 const { execFile } = require("child_process");
 
 const BACKEND_URL = "https://study-buddy-brain.onrender.com";
+const GITHUB_RELEASES_API =
+  "https://api.github.com/repos/burhanuddinkhandwala786/cursor-companion/releases/latest";
 
 let SETTINGS_PATH = "";
+let PACKS_PATH = "";
+let REMOTE_CONFIG_PATH = "";
+let SHORTCUT_PRELOAD_PATH = "";
+let SHORTCUT_HTML_PATH = "";
 
 let hudWin = null;
-let snipWin = null;
 let spotlightWin = null;
 let sidecarWin = null;
+let shortcutWin = null;
 let tray = null;
 
 let isPinned = false;
 let isBusy = false;
+let activeRequestId = 0;
+let busyWatchdog = null;
+let snipCorner1 = null;
+let snipCornerTimer = null;
+
 let escRegistered = false;
 let hideTimer = null;
 let followTimer = null;
-let keepAliveTimer = null;
+let updateCheckTimer = null;
 let pendingHudState = null;
 
 let history = [];
 let historyIdx = -1;
 let lastContextSummary = "";
 let lastGoodByok = null;
-let lockedW = 54;
-let lockedH = 24;
+let lockedW = 62;
+let lockedH = 30;
 let lastWinX = -9999;
 let lastWinY = -9999;
+
+const failedShortcuts = new Set();
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err && err.message ? err.message : err);
+  isBusy = false;
+  clearTimeout(busyWatchdog);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+  isBusy = false;
+  clearTimeout(busyWatchdog);
+});
+
+const DEFAULT_SHORTCUTS = {
+  smartScan: "F8",
+  smartScanAlt: "Alt+A",
+  twoCornerSnip: "F9",
+  twoCornerSnipAlt: "Alt+Q",
+  solveText: "Alt+C",
+  rewriteText: "Alt+W",
+  explainText: "Alt+E",
+  ghostPaste: "Alt+Enter",
+  spotlight: "Alt+G",
+  followup: "Alt+F",
+  apiKey: "Alt+K",
+  sidecar: "Alt+D",
+  pinHud: "Alt+P",
+  cycleHistory: "Alt+H",
+  hideOnly: "Alt+X",
+  forceReset: "F10",
+};
+
+const SHORTCUT_LABELS = [
+  ["smartScan", "Smart Screen Scan (Primary)"],
+  ["smartScanAlt", "Smart Screen Scan (Alt Alias)"],
+  ["twoCornerSnip", "2-Corner Zero-Focus Snip (Primary)"],
+  ["twoCornerSnipAlt", "2-Corner Snip (Alt Alias)"],
+  ["solveText", "Solve Highlighted Text"],
+  ["rewriteText", "Rewrite Highlighted Text"],
+  ["explainText", "Explain Highlighted Text"],
+  ["hideOnly", "Vanish / Hide Overlay Only (No Reset)"],
+  ["forceReset", "Force Cancel & Reset Stuck Scan"],
+  ["sidecar", "Toggle Study Sidecar History"],
+  ["spotlight", "Open Spotlight Ask Bar"],
+  ["followup", "Ask Follow-Up on Last Answer"],
+  ["apiKey", "Personal API Key / Pro Share"],
+  ["pinHud", "Pin / Unpin HUD Pill"],
+  ["cycleHistory", "Show Last / Cycle Answers"],
+  ["ghostPaste", "Ghost Paste Active Answer"],
+];
 
 let settings = {
   userApiKey: "",
   autoCopy: true,
+  activePack: "default",
   deviceId: crypto.randomUUID(),
+  shortcuts: { ...DEFAULT_SHORTCUTS },
+  notifiedVersion: "",
+  dismissedUpdateVersion: "",
+};
+
+const DEFAULT_BYOK_MODELS = {
+  groq_text: ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"],
+  groq_vision: ["qwen/qwen3.8-27b"],
+  gemini: ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.1-flash-lite"],
+  nvidia_text: [
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+  ],
+  nvidia_vision: [
+    "nvidia/nemotron-3.5-bolt-e4b",
+    "nvidia/nemotron-3.5-super-vl-120b-a12b",
+  ],
+  openrouter_text: ["openrouter/free", "google/gemma-4-31b-it:free"],
+  openrouter_vision: [
+    "openrouter/free",
+    "nvidia/nemotron-3.5-super-vl:free",
+    "google/gemma-4-31b-it:free",
+  ],
+  cerebras_text: ["gpt-oss-120b", "qwen-3.8-27b"],
+  cerebras_vision: ["qwen-3.8-27b"],
+  mistral_text: ["mistral-small-latest"],
+  mistral_vision: ["mistral-small-latest"],
+};
+
+let remoteConfig = {
+  latest_version: "",
+  release_url: "https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest",
+  notice: "",
+  byok_models: { ...DEFAULT_BYOK_MODELS },
+};
+
+let modePacks = {};
+
+const DEFAULT_MODE_PACKS = {
+  default: {
+    label: "Exam & Academic Solver (Default)",
+    prompt: "",
+  },
+  coding: {
+    label: "Coding & DSA Interview Pack",
+    prompt:
+      'You are an expert software engineer. Fill "verification" FIRST with time/space complexity and edge cases, then put the exact concise fix or output in "cursor_pill" and clean runnable code in "copy_value". Return ONLY raw JSON: {"verification":"edge cases checked","detected_type":"CODE_FIX","cursor_pill":"concise fix","copy_value":"exact code","expanded_note":"complexity note"}',
+  },
+  excel: {
+    label: "Excel & Finance Formula Pack",
+    prompt:
+      'You are an Excel and finance expert. Fill "verification" FIRST checking cell references and syntax, then put the exact Excel formula in both "cursor_pill" and "copy_value". Return ONLY raw JSON: {"verification":"formula verified","detected_type":"DIRECT_VALUE","cursor_pill":"=XLOOKUP(...)","copy_value":"=XLOOKUP(...)","expanded_note":"1-line usage note"}',
+  },
 };
 
 const LOCAL_CACHE = new Map();
-const LOCAL_CACHE_TTL = 30 * 60 * 1000;
+const LOCAL_CACHE_TTL = 45 * 60 * 1000;
 const BYOK_COOLDOWN = new Map();
 
-function isByokCoolingDown(key, model) {
-  const cacheKey = `${key}:${model}`;
+function isByokCoolingDown(key, model, modality = "txt") {
+  const cacheKey = `${key}:${model}:${modality}`;
   const until = BYOK_COOLDOWN.get(cacheKey);
   if (!until) return false;
   if (Date.now() >= until) {
@@ -65,8 +183,8 @@ function isByokCoolingDown(key, model) {
   return true;
 }
 
-function setByokCooldown(key, model, ms) {
-  BYOK_COOLDOWN.set(`${key}:${model}`, Date.now() + ms);
+function setByokCooldown(key, model, ms, modality = "txt") {
+  BYOK_COOLDOWN.set(`${key}:${model}:${modality}`, Date.now() + ms);
   if (BYOK_COOLDOWN.size > 500) {
     const now = Date.now();
     for (const [cacheKey, until] of BYOK_COOLDOWN) {
@@ -78,6 +196,17 @@ function setByokCooldown(key, model, ms) {
   }
 }
 
+function sanitizeApiKeys(raw) {
+  const cleaned = String(raw || "").replace(
+    /\b(?:bearer|api_key|key)\s*[:=]?\s*/gi,
+    ""
+  );
+  return cleaned
+    .split(/[\s,;]+/)
+    .map((k) => k.trim().replace(/^["']|["']$/g, ""))
+    .filter((k) => k.length > 10);
+}
+
 function normalizeLocalKey(text, mode) {
   const normalized = String(text || "")
     .replace(
@@ -87,7 +216,7 @@ function normalizeLocalKey(text, mode) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "");
 
-  return normalized.length >= 25 ? `${mode}:${normalized}` : "";
+  return normalized.length >= 25 ? `${mode}:${settings.activePack}:${normalized}` : "";
 }
 
 function getLocalCache(key, hasPersonalKey = false) {
@@ -110,13 +239,76 @@ function setLocalCache(key, data) {
     ts: Date.now(),
     data: { ...data },
   });
-  if (LOCAL_CACHE.size > 200) {
+  if (LOCAL_CACHE.size > 250) {
     LOCAL_CACHE.delete(LOCAL_CACHE.keys().next().value);
   }
 }
 
 function initSettingsPath() {
-  SETTINGS_PATH = path.join(app.getPath("userData"), "v3-settings.json");
+  const userDir = app.getPath("userData");
+  SETTINGS_PATH = path.join(userDir, "v3-settings.json");
+  PACKS_PATH = path.join(userDir, "mode-packs.json");
+  REMOTE_CONFIG_PATH = path.join(userDir, "remote-config.json");
+  SHORTCUT_PRELOAD_PATH = path.join(userDir, "shortcut-preload.js");
+  SHORTCUT_HTML_PATH = path.join(userDir, "shortcut-editor.html");
+}
+
+function loadModePacks() {
+  modePacks = { ...DEFAULT_MODE_PACKS };
+  try {
+    if (PACKS_PATH && fs.existsSync(PACKS_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(PACKS_PATH, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        modePacks = { ...DEFAULT_MODE_PACKS, ...parsed };
+      }
+    } else if (PACKS_PATH) {
+      fs.mkdirSync(path.dirname(PACKS_PATH), { recursive: true });
+      fs.writeFileSync(PACKS_PATH, JSON.stringify(DEFAULT_MODE_PACKS, null, 2), "utf8");
+    }
+  } catch (_) {}
+}
+
+function getActiveCustomPrompt() {
+  const pack = modePacks[settings.activePack];
+  return pack && typeof pack.prompt === "string" && pack.prompt.trim()
+    ? pack.prompt.trim()
+    : "";
+}
+
+function encryptKeyForDisk(plainKey) {
+  if (!plainKey) return { userApiKeyEnc: "", userApiKey: "" };
+  try {
+    if (safeStorage && safeStorage.isEncryptionAvailable()) {
+      return {
+        userApiKeyEnc: safeStorage.encryptString(plainKey).toString("base64"),
+        userApiKey: "",
+      };
+    }
+  } catch (_) {}
+  return { userApiKeyEnc: "", userApiKey: plainKey };
+}
+
+function decryptKeyFromDisk(saved) {
+  if (saved && typeof saved.userApiKeyEnc === "string" && saved.userApiKeyEnc) {
+    try {
+      if (safeStorage && safeStorage.isEncryptionAvailable()) {
+        return safeStorage.decryptString(Buffer.from(saved.userApiKeyEnc, "base64"));
+      }
+    } catch (_) {}
+  }
+  return saved && typeof saved.userApiKey === "string" ? saved.userApiKey : "";
+}
+
+function sanitizeShortcutsMap(rawMap) {
+  const merged = { ...DEFAULT_SHORTCUTS };
+  if (rawMap && typeof rawMap === "object" && !Array.isArray(rawMap)) {
+    for (const key of Object.keys(DEFAULT_SHORTCUTS)) {
+      if (typeof rawMap[key] === "string") {
+        merged[key] = rawMap[key].trim();
+      }
+    }
+  }
+  return merged;
 }
 
 function loadSettings() {
@@ -131,25 +323,123 @@ function loadSettings() {
   } catch (_) {}
 
   return {
-    ...saved,
-    userApiKey: typeof saved.userApiKey === "string" ? saved.userApiKey : "",
+    userApiKey: decryptKeyFromDisk(saved),
     autoCopy: typeof saved.autoCopy === "boolean" ? saved.autoCopy : true,
+    activePack: typeof saved.activePack === "string" && saved.activePack ? saved.activePack : "default",
     deviceId:
       typeof saved.deviceId === "string" && saved.deviceId.trim()
         ? saved.deviceId
         : crypto.randomUUID(),
+    shortcuts: sanitizeShortcutsMap(saved.shortcuts),
+    notifiedVersion: typeof saved.notifiedVersion === "string" ? saved.notifiedVersion : "",
+    dismissedUpdateVersion: typeof saved.dismissedUpdateVersion === "string" ? saved.dismissedUpdateVersion : "",
   };
 }
 
 function saveSettings(next) {
-  settings = { ...settings, ...next };
+  settings = {
+    ...settings,
+    ...next,
+    shortcuts: sanitizeShortcutsMap(next.shortcuts || settings.shortcuts),
+  };
   if (!SETTINGS_PATH) return;
   try {
+    const encryptedFields = encryptKeyForDisk(settings.userApiKey || "");
+    const toPersist = {
+      autoCopy: settings.autoCopy,
+      activePack: settings.activePack,
+      deviceId: settings.deviceId,
+      shortcuts: settings.shortcuts,
+      notifiedVersion: settings.notifiedVersion || "",
+      dismissedUpdateVersion: settings.dismissedUpdateVersion || "",
+      userApiKeyEnc: encryptedFields.userApiKeyEnc,
+      ...(encryptedFields.userApiKey ? { userApiKey: encryptedFields.userApiKey } : {}),
+    };
     fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), "utf8");
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(toPersist, null, 2), "utf8");
   } catch (error) {
     console.error("Unable to save settings:", error.message);
   }
+}
+
+function cleanVersionString(v) {
+  return String(v || "").trim().replace(/^v/i, "").split("-")[0];
+}
+
+function mergeRemoteConfig(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  const mergedModels = { ...DEFAULT_BYOK_MODELS };
+  if (data.byok_models && typeof data.byok_models === "object") {
+    for (const [k, v] of Object.entries(data.byok_models)) {
+      if (Array.isArray(v) && v.length > 0 && v.every((m) => typeof m === "string" && m.trim())) {
+        mergedModels[k] = v.map((m) => m.trim());
+      }
+    }
+  }
+  const nextVer = typeof data.latest_version === "string" ? cleanVersionString(data.latest_version) : "";
+  remoteConfig = {
+    latest_version: nextVer || remoteConfig.latest_version,
+    release_url:
+      typeof data.release_url === "string" && data.release_url.startsWith("https://")
+        ? data.release_url.trim()
+        : remoteConfig.release_url,
+    notice: typeof data.notice === "string" ? data.notice.trim() : remoteConfig.notice,
+    byok_models: mergedModels,
+  };
+}
+
+function loadCachedRemoteConfig() {
+  try {
+    if (REMOTE_CONFIG_PATH && fs.existsSync(REMOTE_CONFIG_PATH)) {
+      mergeRemoteConfig(JSON.parse(fs.readFileSync(REMOTE_CONFIG_PATH, "utf8")));
+    }
+  } catch (_) {}
+}
+
+function getByokModels(slot) {
+  const list = remoteConfig.byok_models && remoteConfig.byok_models[slot];
+  if (Array.isArray(list) && list.length > 0) return list;
+  return DEFAULT_BYOK_MODELS[slot] || [];
+}
+
+function isNewerVersion(remoteVer, currentVer) {
+  const rClean = cleanVersionString(remoteVer);
+  const cClean = cleanVersionString(currentVer);
+  if (!rClean || !cClean) return false;
+  const rParts = rClean.split(".").map((n) => parseInt(n, 10) || 0);
+  const cParts = cClean.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(rParts.length, cParts.length); i++) {
+    const r = rParts[i] || 0;
+    const c = cParts[i] || 0;
+    if (r > c) return true;
+    if (r < c) return false;
+  }
+  return false;
+}
+
+function getUpdateInfo() {
+  const currentVersion = cleanVersionString(app.getVersion() || "3.1.0");
+  const latest = cleanVersionString(remoteConfig.latest_version || "");
+  const available = isNewerVersion(latest, currentVersion);
+  return {
+    available,
+    version: latest,
+    currentVersion,
+    url: remoteConfig.release_url,
+    notice: remoteConfig.notice || "",
+    dismissed: Boolean(available && settings.dismissedUpdateVersion === latest),
+  };
+}
+
+function hardenWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    win.setContentProtection(true);
+  } catch (_) {}
+  try {
+    win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    win.webContents.on("will-navigate", (e) => e.preventDefault());
+  } catch (_) {}
 }
 
 function enforceCaptureInvisibility(win) {
@@ -157,39 +447,56 @@ function enforceCaptureInvisibility(win) {
   try {
     win.setContentProtection(true);
   } catch (_) {}
+}
 
-  if (process.platform === "win32") {
-    const applyAffinity = () => {
-      if (!win || win.isDestroyed()) return;
-      try {
-        const hwndBuf = win.getNativeWindowHandle();
-        const hwnd =
-          hwndBuf.length >= 8
-            ? Number(hwndBuf.readBigUInt64LE(0))
-            : hwndBuf.readUInt32LE(0);
-        const ps = `Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint dwAffinity);' -Name W32 -Namespace N; [N.W32]::SetWindowDisplayAffinity([IntPtr]${hwnd}, 0x00000011) | Out-Null`;
-        execFile(
-          "powershell.exe",
-          ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-          { windowsHide: true },
-          () => {}
-        );
-      } catch (_) {}
-    };
-    applyAffinity();
-    setTimeout(applyAffinity, 45);
+function beginRequest() {
+  activeRequestId += 1;
+  const reqId = activeRequestId;
+  isBusy = true;
+  clearTimeout(busyWatchdog);
+  busyWatchdog = setTimeout(() => {
+    if (activeRequestId === reqId && isBusy) {
+      isBusy = false;
+      showHud({ mode: "error", cursor_pill: "Timed out — retry scan" }, 2400);
+    }
+  }, 21000);
+  return reqId;
+}
+
+function finishRequest(reqId) {
+  if (activeRequestId === reqId) {
+    clearTimeout(busyWatchdog);
+    busyWatchdog = null;
+    isBusy = false;
   }
 }
 
-function dismissAllOverlays() {
-  isPinned = false;
+function clearSnipCorner() {
+  snipCorner1 = null;
+  clearTimeout(snipCornerTimer);
+  snipCornerTimer = null;
+}
+
+function hideOverlaysOnly() {
   clearTimeout(hideTimer);
   stopCursorFollow();
 
-  if (snipWin && !snipWin.isDestroyed()) {
-    snipWin.close();
-    snipWin = null;
+  for (const win of [spotlightWin, sidecarWin, hudWin]) {
+    if (win && !win.isDestroyed()) win.hide();
   }
+
+  syncEscapeShortcut();
+}
+
+function forceResetAll() {
+  isPinned = false;
+  activeRequestId += 1;
+  isBusy = false;
+  clearTimeout(busyWatchdog);
+  busyWatchdog = null;
+  clearSnipCorner();
+  clearTimeout(hideTimer);
+  stopCursorFollow();
 
   for (const win of [spotlightWin, sidecarWin, hudWin]) {
     if (win && !win.isDestroyed()) win.hide();
@@ -199,13 +506,14 @@ function dismissAllOverlays() {
 }
 
 function syncEscapeShortcut() {
-  const anyOpen = [hudWin, snipWin, spotlightWin, sidecarWin].some(
+  if (shortcutWin && !shortcutWin.isDestroyed()) return;
+  const anyOpen = [hudWin, spotlightWin, sidecarWin].some(
     (win) => win && !win.isDestroyed() && win.isVisible()
   );
 
   if (anyOpen && !escRegistered) {
     try {
-      escRegistered = globalShortcut.register("Escape", dismissAllOverlays);
+      escRegistered = globalShortcut.register("Escape", hideOverlaysOnly);
     } catch (_) {}
   } else if (!anyOpen && escRegistered) {
     try {
@@ -215,7 +523,7 @@ function syncEscapeShortcut() {
   }
 }
 
-function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 15000) {
+function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 11000) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(bodyObj);
     const url = new URL(urlStr);
@@ -226,6 +534,7 @@ function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 15000) {
         port: url.port || undefined,
         path: url.pathname + url.search,
         method: "POST",
+        family: 4,
         timeout: timeoutMs,
         agent: false,
         headers: {
@@ -260,6 +569,111 @@ function httpsJsonRequest(urlStr, headers, bodyObj, timeoutMs = 15000) {
   });
 }
 
+function httpsGetJson(urlStr, timeoutMs = 9000) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlStr);
+    const req = https.get(
+      {
+        hostname: url.hostname,
+        port: url.port || undefined,
+        path: url.pathname + url.search,
+        agent: false,
+        family: 4,
+        timeout: timeoutMs,
+        headers: {
+          "User-Agent": "Cursor-Companion-Desktop",
+          Accept: "application/json",
+        },
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("error", reject);
+        res.on("end", () => {
+          if (res.statusCode !== 200) {
+            return reject(new Error(`HTTP ${res.statusCode}`));
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      }
+    );
+    req.on("timeout", () => req.destroy(new Error("Timeout")));
+    req.on("error", reject);
+  });
+}
+
+// Dual-source fail-safe sync: checks Render /v3_1/config AND falls back to GitHub Releases API
+async function syncRemoteConfigAndUpdates(manual = false) {
+  let fetched = false;
+
+  try {
+    const data = await httpsGetJson(BACKEND_URL + "/v3_1/config", 9000);
+    if (data && typeof data === "object") {
+      mergeRemoteConfig(data);
+      fetched = true;
+    }
+  } catch (_) {}
+
+  // Fail-safe fallback to GitHub Releases API if Render is sleeping or older
+  try {
+    const gh = await httpsGetJson(GITHUB_RELEASES_API, 8000);
+    if (gh && typeof gh === "object" && gh.tag_name) {
+      const ghVer = cleanVersionString(gh.tag_name);
+      if (isNewerVersion(ghVer, remoteConfig.latest_version || app.getVersion() || "3.1.0")) {
+        mergeRemoteConfig({
+          latest_version: ghVer,
+          release_url:
+            typeof gh.html_url === "string" && gh.html_url.startsWith("https://")
+              ? gh.html_url
+              : remoteConfig.release_url,
+        });
+      }
+      fetched = true;
+    }
+  } catch (_) {}
+
+  if (fetched && REMOTE_CONFIG_PATH) {
+    try {
+      fs.mkdirSync(path.dirname(REMOTE_CONFIG_PATH), { recursive: true });
+      fs.writeFileSync(REMOTE_CONFIG_PATH, JSON.stringify(remoteConfig, null, 2), "utf8");
+    } catch (_) {}
+  }
+
+  rebuildTrayMenu();
+  syncSidecar();
+
+  const info = getUpdateInfo();
+  if (info.available) {
+    if (manual || (settings.notifiedVersion !== info.version && !isBusy)) {
+      saveSettings({ notifiedVersion: info.version });
+      showHud(
+        {
+          mode: "update",
+          cursor_pill: `↑ v${info.version} ready · Press Alt+D or Tray to update`,
+          elapsed: "NEW",
+        },
+        5500
+      );
+    }
+  } else if (manual) {
+    showHud(
+      {
+        mode: "result",
+        cursor_pill: `Up to date (v${info.currentVersion}) ✓`,
+        elapsed: "✓",
+      },
+      2600
+    );
+  }
+}
+
 function parseModelJsonResponse(rawText) {
   const cleaned = String(rawText || "")
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
@@ -268,16 +682,26 @@ function parseModelJsonResponse(rawText) {
     .trim();
 
   let bestObj = null;
-  const regex = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
-  let match;
 
-  while ((match = regex.exec(cleaned)) !== null) {
-    try {
-      const candidate = JSON.parse(match[0]);
-      if (candidate && candidate.cursor_pill) {
-        bestObj = candidate;
-      }
-    } catch (_) {}
+  try {
+    const direct = JSON.parse(cleaned);
+    const item = Array.isArray(direct) ? direct[0] : direct;
+    if (item && typeof item === "object" && item.cursor_pill) {
+      bestObj = item;
+    }
+  } catch (_) {}
+
+  if (!bestObj) {
+    const first = cleaned.indexOf("{");
+    const last = cleaned.lastIndexOf("}");
+    if (first !== -1 && last > first) {
+      try {
+        const sliced = JSON.parse(cleaned.slice(first, last + 1));
+        if (sliced && typeof sliced === "object" && sliced.cursor_pill) {
+          bestObj = sliced;
+        }
+      } catch (_) {}
+    }
   }
 
   if (bestObj && String(bestObj.cursor_pill).trim()) {
@@ -309,258 +733,274 @@ function parseModelJsonResponse(rawText) {
 }
 
 function buildByokInstruction(actionMode) {
-  const baseVerification =
-    'Accuracy is #1. Solve step-by-step internally before outputting JSON. Watch for NOT/EXCEPT/INCORRECT and unit conversions. Read ALL options (A/B/C/D/E) before choosing; if two options hold and a combined option exists ("both A and B", "both B and C", "all of the above"), you MUST pick the combined option. Do not trust pre-selected radio buttons. If unclear/cut off, return cursor_pill "Unclear crop — retry".';
-
+  const custom = getActiveCustomPrompt();
+  if (actionMode === "solve" && custom) {
+    return custom;
+  }
   if (actionMode === "rewrite") {
-    return 'Rewrite cleanly and politely while keeping exact meaning. Return ONLY raw JSON: {"detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}';
+    return 'Rewrite cleanly and politely while keeping exact meaning. Return ONLY raw JSON: {"verification":"tone checked","detected_type":"REWRITE","cursor_pill":"1-line preview","copy_value":"full rewrite","expanded_note":"tone note"}';
   }
   if (actionMode === "explain") {
-    return 'Explain clearly in plain English without guessing. Return ONLY raw JSON: {"detected_type":"CONCEPT_EXPLAIN","cursor_pill":"1-line summary","copy_value":"1-line summary","expanded_note":"3 short bullets"}';
+    return 'Explain clearly in plain English without guessing. Return ONLY raw JSON: {"verification":"facts checked","detected_type":"CONCEPT_EXPLAIN","cursor_pill":"1-line summary","copy_value":"1-line summary","expanded_note":"3 short bullets"}';
   }
-  return `${baseVerification} Return ONLY raw JSON: {"detected_type":"MCQ","cursor_pill":"B. Exact option text","copy_value":"","expanded_note":"1-sentence verification"}`;
+  return [
+    "You are a 10/10 academic and engineering verification engine. Accuracy is strictly #1.",
+    'In the "verification" field FIRST, briefly solve the problem, check for negations (NOT/EXCEPT/INCORRECT), and check ALL options (A/B/C/D/E) including combined choices ("both A and B", "both B and C", "all of the above"). Do NOT trust highlighted radio buttons.',
+    'Only AFTER "verification", output the exact matching option letter + text in "cursor_pill". If cut off or illegible, set cursor_pill to "Unclear crop — retry".',
+    'Return ONLY raw JSON: {"verification":"concise step-by-step check","detected_type":"MCQ","cursor_pill":"B. Exact option text","copy_value":"","expanded_note":"1-sentence summary"}',
+  ].join("\n");
+}
+
+async function querySingleGeminiModel(key, model, sysInstruction, promptText, imgB64, reqTimeout) {
+  const modality = imgB64 ? "img" : "txt";
+  const parts = [{ text: `${sysInstruction}\n\n${promptText}` }];
+  if (imgB64) {
+    parts.push({
+      inline_data: {
+        mime_type: "image/jpeg",
+        data: imgB64,
+      },
+    });
+  }
+
+  const generationConfig = {
+    responseMimeType: "application/json",
+    maxOutputTokens: 900,
+  };
+
+  if (!model.includes("lite")) {
+    generationConfig.thinkingConfig = { thinkingLevel: "LOW" };
+  }
+
+  let res = await httpsJsonRequest(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+    {},
+    { contents: [{ parts }], generationConfig },
+    reqTimeout
+  );
+
+  if (res.status === 400 && generationConfig.thinkingConfig) {
+    delete generationConfig.thinkingConfig;
+    res = await httpsJsonRequest(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
+      {},
+      { contents: [{ parts }], generationConfig },
+      reqTimeout
+    );
+  }
+
+  if (res.status === 200) {
+    const parsed = JSON.parse(res.text);
+    const txt =
+      parsed?.candidates?.[0]?.content?.parts
+        ?.filter((part) => !part.thought)
+        ?.map((part) => part.text || "")
+        .join("\n") || "";
+    const cleanObj = parseModelJsonResponse(txt);
+    if (cleanObj) {
+      lastGoodByok = { key, model };
+      cleanObj.key_source = "BYOK";
+      return cleanObj;
+    }
+    throw new Error(`${model}:nonJSON`);
+  }
+
+  if (res.status === 402) {
+    setByokCooldown(key, model, 86400000, modality);
+  } else if (res.status === 429 || res.status === 503 || res.status === 504) {
+    setByokCooldown(key, model, 45000, modality);
+  } else if (res.status === 404 || res.status === 400) {
+    setByokCooldown(key, model, 3600000, modality);
+  }
+  throw new Error(`${model}:${res.status}`);
+}
+
+async function querySingleOpenAiCompat(key, endpoint, model, providerTag, sysInstruction, promptText, imgB64, reqTimeout) {
+  const modality = imgB64 ? "img" : "txt";
+  const messages = imgB64
+    ? [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: `${sysInstruction}\n\n${promptText}` },
+            {
+              type: "image_url",
+              image_url: { url: `data:image/jpeg;base64,${imgB64}` },
+            },
+          ],
+        },
+      ]
+    : [
+        { role: "system", content: sysInstruction },
+        { role: "user", content: promptText },
+      ];
+
+  const body = {
+    model,
+    messages,
+    temperature: 0.0,
+    max_tokens: 900,
+  };
+
+  if (providerTag === "groq" && model.includes("gpt-oss")) {
+    body.reasoning_effort = "low";
+  }
+  if ((providerTag === "groq" || providerTag === "cerebras" || providerTag === "mistral") && !imgB64) {
+    body.response_format = { type: "json_object" };
+  }
+
+  const headers = { Authorization: `Bearer ${key}` };
+  if (providerTag === "openrouter") {
+    headers["HTTP-Referer"] = "https://study-buddy-brain.onrender.com";
+    headers["X-Title"] = "Cursor Companion";
+  }
+
+  let res = await httpsJsonRequest(endpoint, headers, body, reqTimeout);
+
+  if (res.status === 400 && (body.response_format || body.reasoning_effort)) {
+    delete body.response_format;
+    delete body.reasoning_effort;
+    res = await httpsJsonRequest(endpoint, headers, body, reqTimeout);
+  }
+
+  if (res.status === 200) {
+    const parsed = JSON.parse(res.text);
+    const msg = parsed?.choices?.[0]?.message || {};
+    const cleanObj = parseModelJsonResponse(msg.content || "");
+    if (cleanObj) {
+      lastGoodByok = { key, model };
+      cleanObj.key_source = "BYOK";
+      return cleanObj;
+    }
+    throw new Error(`${model}:nonJSON`);
+  }
+
+  if (res.status === 402) {
+    setByokCooldown(key, model, 86400000, modality);
+  } else if (res.status === 429 || res.status === 503 || res.status === 504) {
+    setByokCooldown(key, model, 30000, modality);
+  } else if (res.status === 400 || res.status === 404) {
+    setByokCooldown(key, model, 3600000, modality);
+  }
+  throw new Error(`${model}:${res.status}`);
 }
 
 async function executeDirectByok(keysRaw, promptText, imgB64, actionMode) {
-  const keys = String(keysRaw || "")
-    .split(/[\s,;]+/)
-    .map((key) => key.trim().replace(/^["']|["']$/g, ""))
-    .filter((key) => key.length > 10);
+  const keys = sanitizeApiKeys(keysRaw);
 
   if (!keys.length) {
     return {
       detected_type: "ERROR",
       cursor_pill: "Invalid key format in Alt+K",
       copy_value: "",
-      expanded_note: "Paste a valid API key starting with AIza, gsk_, nvapi-, sk-or-, or sk-",
+      expanded_note: "Paste a valid key: gsk_, nvapi-, AIza, AQ., sk-or-, csk-, mistral:, or sk-",
       key_source: "BYOK",
     };
   }
 
   const sysInstruction = buildByokInstruction(actionMode);
-  const maxTokens = actionMode === "explain" ? 750 : 520;
-  const reqTimeout = imgB64 ? 18000 : 14000;
+  const reqTimeout = imgB64 ? 10500 : 8500;
+  const modality = imgB64 ? "img" : "txt";
   const failReasons = [];
 
-  for (const key of keys) {
-    try {
-      if (key.startsWith("AIza")) {
-        // Try both current 3.x and 2.5 slugs so EVERY valid AIza key works without breaking on 404/400 model mismatch
-        const defaultModels = [
-          "gemini-3.5-flash-lite",
-          "gemini-3.8-flash",
-          "gemini-3.5-flash",
-        ];
-
-        const geminiModels =
-          lastGoodByok && lastGoodByok.key === key
-            ? [
-                lastGoodByok.model,
-                ...defaultModels.filter((model) => model !== lastGoodByok.model),
-              ]
-            : defaultModels;
-
-        for (const model of geminiModels) {
-          if (isByokCoolingDown(key, model)) continue;
-
-          try {
-            const parts = [{ text: `${sysInstruction}\n\n${promptText}` }];
-            if (imgB64) {
-              parts.push({
-                inline_data: {
-                  mime_type: "image/jpeg",
-                  data: imgB64,
-                },
-              });
-            }
-
-            const res = await httpsJsonRequest(
-              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`,
-              {},
-              {
-                contents: [{ parts }],
-                generationConfig: {
-                  responseMimeType: "application/json",
-                  temperature: 0.0,
-                  maxOutputTokens: maxTokens,
-                },
-              },
-              reqTimeout
-            );
-
-            if (res.status === 200) {
-              const parsed = JSON.parse(res.text);
-              const txt =
-                parsed?.candidates?.[0]?.content?.parts
-                  ?.map((part) => part.text || "")
-                  .join("\n") || "";
-
-              const cleanObj = parseModelJsonResponse(txt);
-              if (cleanObj) {
-                lastGoodByok = { key, model };
-                cleanObj.key_source = "BYOK";
-                return cleanObj;
-              }
-              failReasons.push(`${model}:nonJSON`);
-            } else if (res.status === 429) {
-              setByokCooldown(key, model, 20000);
-              failReasons.push(`${model}:429`);
-            } else if (res.status === 404) {
-              // Model slug unavailable on this key -> continue to next model (do NOT break!)
-              setByokCooldown(key, model, 3600000);
-              failReasons.push(`${model}:404`);
-            } else if (res.status === 400 || res.status === 403) {
-              const errLower = String(res.text || "").toLowerCase();
-              if (errLower.includes("api_key_invalid") || errLower.includes("api key not valid") || res.status === 403) {
-                failReasons.push("Invalid Gemini API key");
-                break; // Only break if the key itself is rejected
-              }
-              setByokCooldown(key, model, 3600000);
-              failReasons.push(`${model}:400`);
-            } else {
-              failReasons.push(`${model}:${res.status}`);
-            }
-          } catch (err) {
-            failReasons.push(`${model}:${err.message || "err"}`);
+  for (const rawKey of keys) {
+    if (rawKey.startsWith("AIza") || rawKey.startsWith("AQ.")) {
+      const models = getByokModels("gemini");
+      for (const model of models) {
+        if (isByokCoolingDown(rawKey, model, modality)) continue;
+        try {
+          return await querySingleGeminiModel(rawKey, model, sysInstruction, promptText, imgB64, reqTimeout);
+        } catch (err) {
+          if (String(err.message || "").includes("Timeout")) {
+            setByokCooldown(rawKey, model, 45000, modality);
           }
+          failReasons.push(err.message || "err");
         }
-      } else if (
-        key.startsWith("gsk_") ||
-        key.startsWith("nvapi-") ||
-        key.startsWith("sk-")
-      ) {
-        const isGroq = key.startsWith("gsk_");
-        const isNvidia = key.startsWith("nvapi-");
-        const isOr = key.startsWith("sk-or-");
-
-        const endpoint = isGroq
-          ? "https://api.groq.com/openai/v1/chat/completions"
-          : isNvidia
-            ? "https://integrate.api.nvidia.com/v1/chat/completions"
-            : isOr
-              ? "https://openrouter.ai/api/v1/chat/completions"
-              : "https://api.openai.com/v1/chat/completions";
-
-        const modelList = isGroq
-          ? imgB64
-            ? ["qwen/qwen3.8-27b", "openai/gpt-oss-120b"]
-            : ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"]
-          : isNvidia
-            ? ["nvidia/nemotron-3.5-super-vl-120b-a12b", "nvidia/nemotron-3.5-lightning-30b-a3b"]
-            : isOr
-              ? ["openrouter/free", "google/gemma-4-31b-it:free"]
-              : ["gpt-4o-mini"];
-
-        const orderedModels =
-          lastGoodByok && lastGoodByok.key === key
-            ? [
-                lastGoodByok.model,
-                ...modelList.filter((m) => m !== lastGoodByok.model),
-              ]
-            : modelList;
-
-        for (const model of orderedModels) {
-          if (isByokCoolingDown(key, model)) continue;
-
-          const messages = imgB64
-            ? [
-                {
-                  role: "user",
-                  content: [
-                    { type: "text", text: `${sysInstruction}\n\n${promptText}` },
-                    {
-                      type: "image_url",
-                      image_url: { url: `data:image/jpeg;base64,${imgB64}` },
-                    },
-                  ],
-                },
-              ]
-            : [
-                { role: "system", content: sysInstruction },
-                { role: "user", content: promptText },
-              ];
-
-          const body = {
-            model,
-            messages,
-            temperature: 0.0,
-            max_tokens: maxTokens,
-          };
-
-          if (isGroq && model.includes("gpt-oss")) {
-            body.reasoning_effort = "medium";
-          }
-          if (isGroq && !imgB64) {
-            body.response_format = { type: "json_object" };
-          }
-
-          try {
-            let res = await httpsJsonRequest(
-              endpoint,
-              { Authorization: `Bearer ${key}` },
-              body,
-              reqTimeout
-            );
-
-            // Retry without strict json_object / reasoning_effort if endpoint returns 400
-            if (res.status === 400 && (body.response_format || body.reasoning_effort)) {
-              delete body.response_format;
-              delete body.reasoning_effort;
-              res = await httpsJsonRequest(
-                endpoint,
-                { Authorization: `Bearer ${key}` },
-                body,
-                reqTimeout
-              );
-            }
-
-            if (res.status === 200) {
-              const parsed = JSON.parse(res.text);
-              const msg = parsed?.choices?.[0]?.message || {};
-              const txt = msg.content || "";
-              const cleanObj = parseModelJsonResponse(txt);
-              if (cleanObj) {
-                lastGoodByok = { key, model };
-                cleanObj.key_source = "BYOK";
-                return cleanObj;
-              }
-              failReasons.push(`${model}:nonJSON`);
-            } else if (res.status === 401 || res.status === 403) {
-              failReasons.push(`Invalid ${isGroq ? "Groq" : isNvidia ? "NVIDIA" : isOr ? "OpenRouter" : "OpenAI"} key`);
-              break;
-            } else if (res.status === 429) {
-              setByokCooldown(key, model, 20000);
-              failReasons.push(`${model}:429`);
-            } else {
-              setByokCooldown(key, model, 3600000);
-              failReasons.push(`${model}:${res.status}`);
-            }
-          } catch (err) {
-            failReasons.push(`${model}:${err.message || "err"}`);
-          }
-        }
-      } else {
-        failReasons.push(`BadPrefix(${key.slice(0, 4)})`);
       }
-    } catch (err) {
-      failReasons.push(err.message || "NetErr");
+    } else if (
+      rawKey.startsWith("gsk_") ||
+      rawKey.startsWith("nvapi-") ||
+      rawKey.startsWith("sk-") ||
+      rawKey.startsWith("csk-") ||
+      rawKey.toLowerCase().startsWith("mistral:")
+    ) {
+      const isGroq = rawKey.startsWith("gsk_");
+      const isNvidia = rawKey.startsWith("nvapi-");
+      const isOr = rawKey.startsWith("sk-or-");
+      const isCerebras = rawKey.startsWith("csk-");
+      const isMistral = rawKey.toLowerCase().startsWith("mistral:");
+
+      const actualKey = isMistral ? rawKey.slice(8).trim() : rawKey;
+      const providerTag = isGroq
+        ? "groq"
+        : isNvidia
+          ? "nvidia"
+          : isOr
+            ? "openrouter"
+            : isCerebras
+              ? "cerebras"
+              : isMistral
+                ? "mistral"
+                : "openai";
+
+      const endpoint = isGroq
+        ? "https://api.groq.com/openai/v1/chat/completions"
+        : isNvidia
+          ? "https://integrate.api.nvidia.com/v1/chat/completions"
+          : isOr
+            ? "https://openrouter.ai/api/v1/chat/completions"
+            : isCerebras
+              ? "https://api.cerebras.ai/v1/chat/completions"
+              : isMistral
+                ? "https://api.mistral.ai/v1/chat/completions"
+                : "https://api.openai.com/v1/chat/completions";
+
+      const modelList = isGroq
+        ? getByokModels(imgB64 ? "groq_vision" : "groq_text")
+        : isNvidia
+          ? getByokModels(imgB64 ? "nvidia_vision" : "nvidia_text")
+          : isOr
+            ? getByokModels(imgB64 ? "openrouter_vision" : "openrouter_text")
+            : isCerebras
+              ? getByokModels(imgB64 ? "cerebras_vision" : "cerebras_text")
+              : isMistral
+                ? getByokModels(imgB64 ? "mistral_vision" : "mistral_text")
+                : ["gpt-4o-mini"];
+
+      for (const model of modelList) {
+        if (isByokCoolingDown(actualKey, model, modality)) continue;
+        try {
+          return await querySingleOpenAiCompat(
+            actualKey,
+            endpoint,
+            model,
+            providerTag,
+            sysInstruction,
+            promptText,
+            imgB64,
+            reqTimeout
+          );
+        } catch (err) {
+          failReasons.push(err.message || "err");
+        }
+      }
+    } else {
+      failReasons.push(`BadPrefix(${rawKey.slice(0, 4)})`);
     }
   }
 
   return {
     detected_type: "ERROR",
-    cursor_pill: failReasons[0] && failReasons[0].startsWith("Invalid ")
-      ? `${failReasons[0]} (Alt+K)`
-      : `Personal key issue (${failReasons.slice(0, 2).join(", ")})`,
+    cursor_pill: `Personal key issue (${failReasons.slice(0, 2).join(", ") || "retry"})`,
     copy_value: "",
     expanded_note: failReasons.join(" | "),
     key_source: "BYOK",
   };
 }
 
-async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
+async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
   const url = new URL(endpoint, BACKEND_URL);
-  const reqTimeout = payload.image_base64 ? 26000 : 18000;
+  const reqTimeout = payload.image_base64 ? 18000 : 15000;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -573,7 +1013,7 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
 
       if (res.status >= 500 && attempt < retries) {
         await new Promise((resolve) =>
-          setTimeout(resolve, 250 + Math.floor(Math.random() * 400))
+          setTimeout(resolve, 200 + Math.floor(Math.random() * 250))
         );
         continue;
       }
@@ -586,7 +1026,7 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
     } catch (error) {
       if (attempt >= retries) throw error;
       await new Promise((resolve) =>
-        setTimeout(resolve, 250 + Math.floor(Math.random() * 400))
+        setTimeout(resolve, 200 + Math.floor(Math.random() * 250))
       );
     }
   }
@@ -594,25 +1034,10 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 1) {
   throw new Error("Request failed");
 }
 
-function warmBackend() {
-  try {
-    const req = https.get(
-      BACKEND_URL + "/healthz",
-      { agent: false, timeout: 10000 },
-      (res) => {
-        res.on("error", () => {});
-        res.resume();
-      }
-    );
-    req.on("timeout", () => req.destroy());
-    req.on("error", () => {});
-  } catch (_) {}
-}
-
 function createHudWindow() {
   const win = new BrowserWindow({
-    width: 54,
-    height: 24,
+    width: 62,
+    height: 30,
     useContentSize: true,
     frame: false,
     transparent: true,
@@ -628,6 +1053,7 @@ function createHudWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
     },
   });
 
@@ -636,6 +1062,7 @@ function createHudWindow() {
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setIgnoreMouseEvents(true, { forward: true });
+  hardenWindow(win);
 
   win.webContents.on("did-finish-load", () => {
     if (!win.isDestroyed() && pendingHudState) {
@@ -663,18 +1090,14 @@ function snapToCursor(force = false) {
   const disp = screen.getDisplayNearestPoint(pt);
   const wa = disp.workArea;
 
-  let x = pt.x + 12;
-  let y = pt.y + 12;
+  let x = pt.x + 14;
+  let y = pt.y + 14;
 
-  if (x + lockedW > wa.x + wa.width - 6) x = pt.x - lockedW - 10;
-  if (y + lockedH > wa.y + wa.height - 6) y = pt.y - lockedH - 10;
+  if (x + lockedW > wa.x + wa.width - 6) x = pt.x - lockedW - 12;
+  if (y + lockedH > wa.y + wa.height - 6) y = pt.y - lockedH - 12;
 
-  x = Math.round(
-    Math.max(wa.x + 4, Math.min(x, wa.x + wa.width - lockedW - 4))
-  );
-  y = Math.round(
-    Math.max(wa.y + 4, Math.min(y, wa.y + wa.height - lockedH - 4))
-  );
+  x = Math.round(Math.max(wa.x + 4, Math.min(x, wa.x + wa.width - lockedW - 4)));
+  y = Math.round(Math.max(wa.y + 4, Math.min(y, wa.y + wa.height - lockedH - 4)));
 
   if (force || x !== lastWinX || y !== lastWinY) {
     lastWinX = x;
@@ -710,14 +1133,16 @@ function showHud(payload, autoHideMs = 0) {
   const badgeReserve =
     payload.key_source === "BYOK" ||
     payload.key_source === "BYOK_CACHE" ||
-    payload.key_source === "CACHE"
-      ? 72
-      : 58;
+    payload.key_source === "CACHE" ||
+    payload.key_source === "PRO" ||
+    payload.mode === "update"
+      ? 86
+      : 68;
 
   lockedW = isLoading
-    ? 54
-    : Math.max(126, Math.min(340, Math.round(textLen * 7.5 + badgeReserve)));
-  lockedH = 24;
+    ? 62
+    : Math.max(132, Math.min(410, Math.round(textLen * 7.6 + badgeReserve)));
+  lockedH = 30;
 
   hudWin.setFocusable(false);
   hudWin.setIgnoreMouseEvents(true, { forward: true });
@@ -739,6 +1164,9 @@ function showHud(payload, autoHideMs = 0) {
     hudWin.showInactive();
   }
   enforceCaptureInvisibility(hudWin);
+  try {
+    hudWin.moveTop();
+  } catch (_) {}
 
   snapToCursor(true);
   syncEscapeShortcut();
@@ -774,10 +1202,10 @@ function openSpotlight(initialMode = "ask") {
   const pt = screen.getCursorScreenPoint();
   const wa = screen.getDisplayNearestPoint(pt).workArea;
 
-  const width = 440;
-  const height = 44;
+  const width = 480;
+  const height = 56;
   const x = Math.round(wa.x + (wa.width - width) / 2);
-  const y = Math.round(wa.y + 42);
+  const y = Math.round(wa.y + 48);
 
   const state = {
     spotlightMode: initialMode,
@@ -825,6 +1253,7 @@ function openSpotlight(initialMode = "ask") {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
     },
   });
 
@@ -832,6 +1261,7 @@ function openSpotlight(initialMode = "ask") {
 
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  hardenWindow(win);
 
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;
@@ -867,15 +1297,18 @@ function toggleSidecar() {
   const pt = screen.getCursorScreenPoint();
   const wa = screen.getDisplayNearestPoint(pt).workArea;
 
-  const width = 276;
-  const height = Math.max(1, Math.min(480, wa.height - 48));
-  const x = Math.round(wa.x + wa.width - width - 12);
+  const width = 296;
+  const height = Math.max(1, Math.min(520, wa.height - 48));
+  const x = Math.round(wa.x + wa.width - width - 14);
   const y = Math.round(wa.y + 24);
 
   if (sidecarWin && !sidecarWin.isDestroyed()) {
     sidecarWin.setBounds({ x, y, width, height });
     sidecarWin.showInactive();
     enforceCaptureInvisibility(sidecarWin);
+    try {
+      sidecarWin.moveTop();
+    } catch (_) {}
     syncEscapeShortcut();
     syncSidecar();
     return;
@@ -901,6 +1334,7 @@ function toggleSidecar() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      webSecurity: true,
     },
   });
 
@@ -908,11 +1342,15 @@ function toggleSidecar() {
 
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  hardenWindow(win);
 
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;
     win.showInactive();
     enforceCaptureInvisibility(win);
+    try {
+      win.moveTop();
+    } catch (_) {}
     syncEscapeShortcut();
     syncSidecar();
   });
@@ -938,8 +1376,171 @@ function syncSidecar() {
       history,
       activeIdx: historyIdx,
       hasUserKey: Boolean(settings.userApiKey),
+      appVersion: cleanVersionString(app.getVersion() || "3.1.0"),
+      updateInfo: getUpdateInfo(),
     });
   }
+}
+
+// --- Built-in GUI Shortcut Customizer (Matching Obsidian / Apple / Omega Theme) ---
+function ensureShortcutEditorAssets() {
+  const preloadCode = [
+    'const { contextBridge, ipcRenderer } = require("electron");',
+    'contextBridge.exposeInMainWorld("shortcutApi", {',
+    '  getData: () => ipcRenderer.invoke("shortcuts-get"),',
+    '  save: (map) => ipcRenderer.invoke("shortcuts-save", map),',
+    '  reset: () => ipcRenderer.invoke("shortcuts-reset"),',
+    '  close: () => ipcRenderer.send("shortcuts-close"),',
+    "});",
+  ].join("\n");
+
+  const editorHtml = [
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Customize Shortcuts</title>",
+    "<style>",
+    "*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI Variable','Segoe UI',sans-serif}",
+    "body{background:#000;color:#f5f5f7;padding:22px 20px;user-select:none;-webkit-font-smoothing:antialiased}",
+    "h2{font-size:17px;font-weight:700;letter-spacing:-0.03em;margin-bottom:4px}",
+    ".sub{font-size:12px;color:#86868b;margin-bottom:16px}",
+    ".list{max-height:366px;overflow-y:auto;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:#161617}",
+    ".list::-webkit-scrollbar{width:5px}.list::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.16);border-radius:5px}",
+    ".row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.08);gap:10px}",
+    ".row:last-child{border-bottom:none}",
+    ".lbl{font-size:12.5px;color:#d2d2d7;letter-spacing:-0.01em}",
+    ".ctrl{display:flex;align-items:center;gap:6px}",
+    ".keybtn{min-width:130px;height:30px;padding:0 11px;border-radius:9px;border:1px solid rgba(255,255,255,0.14);background:linear-gradient(180deg,#3a3a3c,#2a2a2c);box-shadow:0 2px 0 #0a0a0a,inset 0 1px 0 rgba(255,255,255,0.12);color:#f5f5f7;font-size:12px;font-weight:600;cursor:pointer;text-align:center}",
+    ".keybtn.rec{border-color:#2997ff;background:#0071e3;color:#fff;box-shadow:0 0 12px rgba(41,151,255,0.45)}",
+    ".keybtn.clash{border-color:rgba(255,159,10,0.65);color:#ffd60a}",
+    ".clr{height:28px;padding:0 9px;border-radius:980px;border:1px solid rgba(255,255,255,0.12);background:transparent;color:#86868b;font-size:11px;cursor:pointer}",
+    ".clr:hover{color:#fff;border-color:rgba(255,255,255,0.3)}",
+    ".bar{display:flex;justify-content:space-between;align-items:center;margin-top:16px;gap:8px}",
+    ".btn{padding:9px 16px;border-radius:980px;border:1px solid rgba(255,255,255,0.14);background:#1c1c1e;color:#f5f5f7;font-size:12.5px;font-weight:500;cursor:pointer}",
+    ".btn:hover{background:#2c2c2e}",
+    ".btn.primary{background:#0071e3;border-color:#0071e3;color:#fff}",
+    ".btn.primary:hover{background:#0077ed}",
+    ".msg{font-size:12px;color:#30d158;min-height:17px;margin-top:10px}",
+    "</style></head><body>",
+    "<h2>Customize Shortcuts</h2>",
+    "<div class='sub'>Click any keycap, then press your combo. Click Clear to disable a clashing hotkey.</div>",
+    "<div class='list' id='list'></div>",
+    "<div class='msg' id='msg'></div>",
+    "<div class='bar'>",
+    "  <button class='btn' id='resetBtn'>Reset Defaults</button>",
+    "  <div style='display:flex;gap:8px'>",
+    "    <button class='btn' id='closeBtn'>Close</button>",
+    "    <button class='btn primary' id='saveBtn'>Save & Apply</button>",
+    "  </div>",
+    "</div>",
+    "<script>",
+    "let state = {}; let labels = []; let failed = new Set(); let activeKey = null;",
+    "function keyToAccel(e) {",
+    "  const mods = [];",
+    "  if (e.ctrlKey) mods.push('Control');",
+    "  if (e.altKey) mods.push('Alt');",
+    "  if (e.shiftKey) mods.push('Shift');",
+    "  if (e.metaKey) mods.push('Super');",
+    "  const k = e.key;",
+    "  const c = e.code || '';",
+    "  if (['Control','Alt','Shift','Meta'].includes(k)) return null;",
+    "  if (k === 'Escape') return 'CANCEL';",
+    "  let main = '';",
+    "  if (/^F([1-9]|1[0-2])$/i.test(k)) main = k.toUpperCase();",
+    "  else if (/^Key([A-Z])$/.test(c)) main = c.slice(3);",
+    "  else if (/^Digit([0-9])$/.test(c)) main = c.slice(5);",
+    "  else if (k === ' ') main = 'Space';",
+    "  else if (k === 'Enter') main = 'Enter';",
+    "  else if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(k)) main = k.replace('Arrow','');",
+    "  else if (['Tab','Backspace','Delete','Insert','Home','End','PageUp','PageDown'].includes(k)) main = k;",
+    "  else if (k.length === 1) main = k.toUpperCase();",
+    "  else return null;",
+    "  if (mods.length === 0 && !/^F([1-9]|1[0-2])$/.test(main)) return null;",
+    "  return mods.concat([main]).join('+');",
+    "}",
+    "function render() {",
+    "  const list = document.getElementById('list');",
+    "  list.textContent = '';",
+    "  labels.forEach(([id, title]) => {",
+    "    const row = document.createElement('div'); row.className = 'row';",
+    "    const lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = title;",
+    "    const ctrl = document.createElement('div'); ctrl.className = 'ctrl';",
+    "    const btn = document.createElement('button');",
+    "    const val = state[id] || '';",
+    "    btn.className = 'keybtn' + (activeKey === id ? ' rec' : '') + (failed.has(id) ? ' clash' : '');",
+    "    btn.textContent = activeKey === id ? 'Press keys...' : (val || 'Disabled') + (failed.has(id) ? ' (Clash)' : '');",
+    "    btn.onclick = () => { activeKey = (activeKey === id ? null : id); render(); };",
+    "    const clr = document.createElement('button'); clr.className = 'clr'; clr.textContent = 'Clear';",
+    "    clr.onclick = () => { state[id] = ''; activeKey = null; failed.delete(id); render(); };",
+    "    ctrl.appendChild(btn); ctrl.appendChild(clr);",
+    "    row.appendChild(lbl); row.appendChild(ctrl); list.appendChild(row);",
+    "  });",
+    "}",
+    "window.addEventListener('keydown', (e) => {",
+    "  if (!activeKey) return;",
+    "  e.preventDefault(); e.stopPropagation();",
+    "  const acc = keyToAccel(e);",
+    "  if (acc === 'CANCEL') { activeKey = null; render(); return; }",
+    "  if (acc) { state[activeKey] = acc; failed.delete(activeKey); activeKey = null; render(); }",
+    "});",
+    "document.getElementById('saveBtn').onclick = async () => {",
+    "  const res = await window.shortcutApi.save(state);",
+    "  state = res.shortcuts; failed = new Set(res.failed || []);",
+    "  document.getElementById('msg').textContent = failed.size ? 'Saved — highlighted items clashed with another app.' : 'Shortcuts saved and active.';",
+    "  render();",
+    "};",
+    "document.getElementById('resetBtn').onclick = async () => {",
+    "  const res = await window.shortcutApi.reset();",
+    "  state = res.shortcuts; failed = new Set(res.failed || []);",
+    "  document.getElementById('msg').textContent = 'Reset to defaults.';",
+    "  render();",
+    "};",
+    "document.getElementById('closeBtn').onclick = () => window.shortcutApi.close();",
+    "window.shortcutApi.getData().then((d) => { state = d.shortcuts; labels = d.labels; failed = new Set(d.failed || []); render(); });",
+    "</script></body></html>",
+  ].join("\n");
+
+  fs.mkdirSync(path.dirname(SHORTCUT_PRELOAD_PATH), { recursive: true });
+  fs.writeFileSync(SHORTCUT_PRELOAD_PATH, preloadCode, "utf8");
+  fs.writeFileSync(SHORTCUT_HTML_PATH, editorHtml, "utf8");
+}
+
+function openShortcutEditor() {
+  if (shortcutWin && !shortcutWin.isDestroyed()) {
+    shortcutWin.show();
+    shortcutWin.focus();
+    return;
+  }
+
+  ensureShortcutEditorAssets();
+  globalShortcut.unregisterAll();
+  escRegistered = false;
+
+  const win = new BrowserWindow({
+    width: 520,
+    height: 530,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    alwaysOnTop: true,
+    title: "Cursor Companion — Customize Shortcuts",
+    backgroundColor: "#000000",
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: SHORTCUT_PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true,
+    },
+  });
+
+  shortcutWin = win;
+  hardenWindow(win);
+
+  win.on("closed", () => {
+    if (shortcutWin === win) shortcutWin = null;
+    registerAllShortcuts();
+    rebuildTrayMenu();
+  });
+
+  win.loadFile(SHORTCUT_HTML_PATH);
 }
 
 async function captureDisplayNative(display) {
@@ -964,14 +1565,18 @@ async function captureDisplayNative(display) {
   return { image: match.thumbnail, sf };
 }
 
-async function captureAroundCursor(boxW = 680, boxH = 420) {
+async function captureAroundCursorBuffer(boxW = 960, boxH = 680, fullScreen = false, vBias = 0.35) {
   const pt = screen.getCursorScreenPoint();
   const disp = screen.getDisplayNearestPoint(pt);
   const { image, sf } = await captureDisplayNative(disp);
+  const sz = image.getSize();
+
+  if (fullScreen) {
+    return image.toJPEG(74);
+  }
 
   const relX = pt.x - disp.bounds.x;
   const relY = pt.y - disp.bounds.y;
-  const sz = image.getSize();
 
   const cropW = Math.min(Math.round(boxW * sf), sz.width);
   const cropH = Math.min(Math.round(boxH * sf), sz.height);
@@ -982,17 +1587,44 @@ async function captureAroundCursor(boxW = 680, boxH = 420) {
 
   const left = Math.max(
     0,
-    Math.min(Math.round(relX * sf - cropW * 0.42), sz.width - cropW)
+    Math.min(Math.round(relX * sf - cropW * 0.45), sz.width - cropW)
   );
   const top = Math.max(
     0,
-    Math.min(Math.round(relY * sf - cropH * 0.25), sz.height - cropH)
+    Math.min(Math.round(relY * sf - cropH * vBias), sz.height - cropH)
   );
 
-  return image
-    .crop({ x: left, y: top, width: cropW, height: cropH })
-    .toJPEG(78)
-    .toString("base64");
+  return image.crop({ x: left, y: top, width: cropW, height: cropH }).toJPEG(78);
+}
+
+async function captureBetweenPointsBuffer(p1, p2) {
+  const disp = screen.getDisplayNearestPoint(p1);
+  const { image, sf } = await captureDisplayNative(disp);
+  const sz = image.getSize();
+
+  const relX1 = p1.x - disp.bounds.x;
+  const relY1 = p1.y - disp.bounds.y;
+  const relX2 = p2.x - disp.bounds.x;
+  const relY2 = p2.y - disp.bounds.y;
+
+  const rawW = Math.abs(relX2 - relX1);
+  const rawH = Math.abs(relY2 - relY1);
+
+  if (rawW < 20 || rawH < 20) {
+    return captureAroundCursorBuffer(960, 680, false, 0.35);
+  }
+
+  const pad = Math.round(28 * sf);
+  const x = Math.max(0, Math.round(Math.min(relX1, relX2) * sf - pad));
+  const y = Math.max(0, Math.round(Math.min(relY1, relY2) * sf - pad));
+  const w = Math.min(sz.width - x, Math.round(rawW * sf + pad * 2));
+  const h = Math.min(sz.height - y, Math.round(rawH * sf + pad * 2));
+
+  if (w < 10 || h < 10) {
+    return captureAroundCursorBuffer(960, 680, false, 0.35);
+  }
+
+  return image.crop({ x, y, width: w, height: h }).toJPEG(80);
 }
 
 function grabSelectedTextDirectly() {
@@ -1001,51 +1633,63 @@ function grabSelectedTextDirectly() {
   }
 
   return new Promise((resolve) => {
-    const sentinel = `__CC_WAIT_${Date.now()}__`;
+    const sentinel = `__CC_WAIT_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
     const prev = clipboard.readText();
+    let settled = false;
+    let psExitedAt = 0;
 
     clipboard.writeText(sentinel);
 
     const ps = `
 Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace U;
-[U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 35;
-[U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 25;
-[U.K]::keybd_event(0x43, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+try {
+  [U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero);
+  Start-Sleep -Milliseconds 30;
+  [U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero);
+  Start-Sleep -Milliseconds 15;
+} finally {
+  [U.K]::keybd_event(0x43, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA2, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA3, 0, 2, [UIntPtr]::Zero);
+}
 `;
 
-    const triggerCopy = () => {
-      execFile(
-        "powershell.exe",
-        ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-        { windowsHide: true },
-        () => {}
-      );
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
+      { windowsHide: true },
+      () => {
+        psExitedAt = Date.now();
+      }
+    );
+
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      clearInterval(poll);
+      setTimeout(() => {
+        try {
+          clipboard.writeText(prev);
+        } catch (_) {}
+        resolve(val);
+      }, 35);
     };
 
-    triggerCopy();
-
     let checks = 0;
-
     const poll = setInterval(() => {
       checks++;
       const current = clipboard.readText();
-
       if (current && current !== sentinel) {
-        clearInterval(poll);
-        clipboard.writeText(prev);
-        resolve(current.trim());
-      } else if (checks === 9) {
-        triggerCopy();
-      } else if (checks >= 22) {
-        clearInterval(poll);
-        clipboard.writeText(prev);
-        resolve("");
+        finish(current.trim());
+      } else if (psExitedAt > 0 && Date.now() - psExitedAt > 140) {
+        finish("");
+      } else if (checks >= 72) {
+        finish("");
       }
     }, 25);
   });
@@ -1065,15 +1709,20 @@ function ghostPasteActiveValue() {
 
   const ps = `
 Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace U;
-[U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 40;
-[U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero);
-Start-Sleep -Milliseconds 25;
-[U.K]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero);
-[U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+try {
+  [U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
+  Start-Sleep -Milliseconds 35;
+  [U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero);
+  Start-Sleep -Milliseconds 15;
+} finally {
+  [U.K]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA2, 0, 2, [UIntPtr]::Zero);
+  [U.K]::keybd_event(0xA3, 0, 2, [UIntPtr]::Zero);
+}
 `;
 
   execFile(
@@ -1093,6 +1742,7 @@ async function runAnalysisPipeline({
 }) {
   const mode = actionMode || "solve";
   const userKey = String(settings.userApiKey || "").trim();
+  const customPrompt = mode === "solve" ? getActiveCustomPrompt() : "";
 
   const promptText = followUp
     ? `Context:\n${priorContext || ""}\n\nFollow-up:\n${followUp}`
@@ -1133,13 +1783,14 @@ async function runAnalysisPipeline({
     return byokResult;
   }
 
-  const poolResult = await postJsonWithJitterRetry("/v3/analyze", {
+  const poolResult = await postJsonWithJitterRetry("/v3_1/analyze", {
     text_content: textContent || null,
     image_base64: imageBase64 || null,
     follow_up: followUp || null,
     prior_context: priorContext || null,
     action_mode: mode,
     device_id: settings.deviceId,
+    custom_prompt: customPrompt || null,
   });
 
   if (
@@ -1156,33 +1807,104 @@ async function runAnalysisPipeline({
 
 async function handleInstantScan() {
   if (isBusy) return;
-  isBusy = true;
+  clearSnipCorner();
+  const reqId = beginRequest();
   const t0 = Date.now();
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
-    const b64 = await captureAroundCursor(680, 420);
-    const res = await runAnalysisPipeline({
-      imageBase64: b64,
+    const buf = await captureAroundCursorBuffer(960, 680, false, 0.35);
+    if (activeRequestId !== reqId) return;
+
+    let res = await runAnalysisPipeline({
+      imageBase64: buf.toString("base64"),
       actionMode: "solve",
     });
+    if (activeRequestId !== reqId) return;
+
+    if (res && /unclear crop/i.test(String(res.cursor_pill || ""))) {
+      const fullBuf = await captureAroundCursorBuffer(1280, 860, true);
+      if (activeRequestId !== reqId) return;
+      res = await runAnalysisPipeline({
+        imageBase64: fullBuf.toString("base64"),
+        actionMode: "solve",
+      });
+    }
+
+    if (activeRequestId !== reqId) return;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
-    handleResult(res, elapsed, "[Cursor Question Scan]");
+    handleResult(res, elapsed, "[Smart Screen Scan]");
   } catch (_) {
-    showHud({ mode: "error", cursor_pill: "Retry Alt+A" }, 2400);
+    if (activeRequestId === reqId) {
+      showHud({ mode: "error", cursor_pill: "Retry scan" }, 2400);
+    }
   } finally {
-    isBusy = false;
+    finishRequest(reqId);
+  }
+}
+
+async function handleTwoCornerSnip() {
+  if (isBusy) return;
+
+  const pt = screen.getCursorScreenPoint();
+
+  if (!snipCorner1) {
+    snipCorner1 = { x: pt.x, y: pt.y, ts: Date.now() };
+    clearTimeout(snipCornerTimer);
+    snipCornerTimer = setTimeout(() => {
+      clearSnipCorner();
+      syncEscapeShortcut();
+    }, 15000);
+    showHud(
+      {
+        mode: "result",
+        detected_type: "DIRECT_VALUE",
+        cursor_pill: "Corner 1 set · tap bottom-right",
+        elapsed: "1/2",
+      },
+      6000
+    );
+    return;
+  }
+
+  const p1 = snipCorner1;
+  clearSnipCorner();
+  const reqId = beginRequest();
+  const t0 = Date.now();
+
+  try {
+    showHud({ mode: "loading", cursor_pill: "•••" });
+    const buf = await captureBetweenPointsBuffer(p1, pt);
+    if (activeRequestId !== reqId) return;
+
+    const res = await runAnalysisPipeline({
+      imageBase64: buf.toString("base64"),
+      actionMode: "solve",
+    });
+    if (activeRequestId !== reqId) return;
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+    handleResult(res, elapsed, "[2-Corner Snip]");
+  } catch (_) {
+    if (activeRequestId === reqId) {
+      showHud({ mode: "error", cursor_pill: "Retry snip" }, 2400);
+    }
+  } finally {
+    finishRequest(reqId);
   }
 }
 
 async function handleTextAction(actionMode = "solve") {
   if (isBusy) return;
-  isBusy = true;
+  clearSnipCorner();
+  const reqId = beginRequest();
   const t0 = Date.now();
 
   try {
     showHud({ mode: "loading", cursor_pill: "•••" });
     const selected = await grabSelectedTextDirectly();
+    if (activeRequestId !== reqId) return;
+
     let res;
     let sourceLabel = selected;
 
@@ -1192,77 +1914,25 @@ async function handleTextAction(actionMode = "solve") {
         actionMode,
       });
     } else {
-      const b64 = await captureAroundCursor(640, 340);
-      sourceLabel = `[Highlighted ${actionMode} Scan]`;
+      const buf = await captureAroundCursorBuffer(960, 680, false, 0.58);
+      if (activeRequestId !== reqId) return;
+      sourceLabel = `[Cursor ${actionMode} Scan]`;
       res = await runAnalysisPipeline({
-        imageBase64: b64,
+        imageBase64: buf.toString("base64"),
         actionMode,
       });
     }
 
+    if (activeRequestId !== reqId) return;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, sourceLabel);
   } catch (_) {
-    showHud({ mode: "error", cursor_pill: "Retry hotkey" }, 2400);
+    if (activeRequestId === reqId) {
+      showHud({ mode: "error", cursor_pill: "Retry hotkey" }, 2400);
+    }
   } finally {
-    isBusy = false;
+    finishRequest(reqId);
   }
-}
-
-function handleRegionSnip() {
-  if (isBusy) return;
-
-  const pt = screen.getCursorScreenPoint();
-  const disp = screen.getDisplayNearestPoint(pt);
-
-  if (snipWin && !snipWin.isDestroyed()) {
-    snipWin.close();
-    snipWin = null;
-  }
-
-  const win = new BrowserWindow({
-    x: disp.bounds.x,
-    y: disp.bounds.y,
-    width: disp.bounds.width,
-    height: disp.bounds.height,
-    frame: false,
-    transparent: true,
-    backgroundColor: "#00000000",
-    thickFrame: false,
-    hasShadow: false,
-    focusable: false,
-    alwaysOnTop: true,
-    skipTaskbar: true,
-    resizable: false,
-    show: false,
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  });
-
-  snipWin = win;
-
-  win.setAlwaysOnTop(true, "screen-saver");
-  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-
-  win.webContents.once("did-finish-load", () => {
-    if (win.isDestroyed()) return;
-    win.showInactive();
-    enforceCaptureInvisibility(win);
-    syncEscapeShortcut();
-    win.webContents.send("snip-init", { displayId: disp.id });
-  });
-
-  win.on("closed", () => {
-    if (snipWin === win) snipWin = null;
-    syncEscapeShortcut();
-  });
-
-  win.loadFile(path.join(__dirname, "index.html"), {
-    hash: "snip",
-  });
 }
 
 function handleResult(res, elapsed, sourceContext) {
@@ -1281,7 +1951,7 @@ function handleResult(res, elapsed, sourceContext) {
           "High traffic — retry",
         key_source: (res && res.key_source) || undefined,
       },
-      2800
+      3200
     );
     return;
   }
@@ -1311,76 +1981,6 @@ function handleResult(res, elapsed, sourceContext) {
   syncSidecar();
 }
 
-ipcMain.on("snip-complete", async (_event, rect) => {
-  if (snipWin && !snipWin.isDestroyed()) {
-    snipWin.close();
-    snipWin = null;
-  }
-
-  syncEscapeShortcut();
-
-  if (
-    isBusy ||
-    !rect ||
-    ![rect.x, rect.y, rect.w, rect.h].every(Number.isFinite) ||
-    rect.w < 10 ||
-    rect.h < 10
-  ) {
-    return;
-  }
-
-  isBusy = true;
-  const t0 = Date.now();
-
-  try {
-    showHud({ mode: "loading", cursor_pill: "•••" });
-
-    const disp =
-      screen
-        .getAllDisplays()
-        .find((display) => String(display.id) === String(rect.displayId)) ||
-      screen.getPrimaryDisplay();
-
-    const { image, sf } = await captureDisplayNative(disp);
-    const sz = image.getSize();
-    const pad = Math.round(28 * sf);
-
-    const x = Math.max(0, Math.round(rect.x * sf - pad));
-    const y = Math.max(0, Math.round(rect.y * sf - pad));
-    const w = Math.min(sz.width - x, Math.round(rect.w * sf + pad * 2));
-    const h = Math.min(sz.height - y, Math.round(rect.h * sf + pad * 2));
-
-    if (w < 1 || h < 1) {
-      throw new Error("Invalid snip dimensions");
-    }
-
-    const b64 = image
-      .crop({ x, y, width: w, height: h })
-      .toJPEG(80)
-      .toString("base64");
-
-    const res = await runAnalysisPipeline({
-      imageBase64: b64,
-      actionMode: "solve",
-    });
-
-    const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
-    handleResult(res, elapsed, "[Snipped Region]");
-  } catch (_) {
-    showHud({ mode: "error", cursor_pill: "Retry Alt+Q" }, 2400);
-  } finally {
-    isBusy = false;
-  }
-});
-
-ipcMain.on("snip-cancel", () => {
-  if (snipWin && !snipWin.isDestroyed()) {
-    snipWin.close();
-    snipWin = null;
-  }
-  syncEscapeShortcut();
-});
-
 async function processSpotlightQuery(_event, query) {
   if (spotlightWin && !spotlightWin.isDestroyed()) {
     spotlightWin.hide();
@@ -1390,7 +1990,7 @@ async function processSpotlightQuery(_event, query) {
   if (typeof query !== "string" || !query.trim() || isBusy) return;
 
   query = query.trim();
-  isBusy = true;
+  const reqId = beginRequest();
   const t0 = Date.now();
 
   try {
@@ -1407,19 +2007,22 @@ async function processSpotlightQuery(_event, query) {
           actionMode: "solve",
         });
 
+    if (activeRequestId !== reqId) return;
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
     handleResult(res, elapsed, query);
   } catch (_) {
-    showHud({ mode: "error", cursor_pill: "Retry Alt+G" }, 2400);
+    if (activeRequestId === reqId) {
+      showHud({ mode: "error", cursor_pill: "Retry Spotlight" }, 2400);
+    }
   } finally {
-    isBusy = false;
+    finishRequest(reqId);
   }
 }
 
 ipcMain.on("hud-spotlight-query", processSpotlightQuery);
 ipcMain.on("hud-followup", processSpotlightQuery);
 
-ipcMain.on("hud-save-key", (_event, key) => {
+ipcMain.on("hud-save-key", async (_event, key) => {
   if (typeof key !== "string") return;
 
   if (spotlightWin && !spotlightWin.isDestroyed()) {
@@ -1431,22 +2034,95 @@ ipcMain.on("hud-save-key", (_event, key) => {
   BYOK_COOLDOWN.clear();
   LOCAL_CACHE.clear();
 
-  const cleanKey = key.trim();
+  const trimmed = key.trim();
+  if (trimmed.toLowerCase().startsWith("share:")) {
+    const sharedKey = trimmed.slice(6).trim();
+    showHud({ mode: "loading", cursor_pill: "•••" });
+    try {
+      const resp = await postJsonWithJitterRetry("/v3_1/contribute-key", {
+        api_key: sharedKey,
+        device_id: settings.deviceId,
+      });
+      if (resp && resp.ok) {
+        settings.userApiKey = "";
+        saveSettings({ userApiKey: "" });
+        syncSidecar();
+        showHud(
+          {
+            mode: "result",
+            detected_type: "DIRECT_VALUE",
+            cursor_pill: resp.message || "Pro Pool Unlocked ✓",
+            key_source: "PRO",
+            elapsed: "★",
+          },
+          3200
+        );
+      } else {
+        showHud(
+          {
+            mode: "error",
+            cursor_pill: (resp && resp.message) || "Could not verify shared key",
+          },
+          3400
+        );
+      }
+    } catch (_) {
+      showHud({ mode: "error", cursor_pill: "Share check failed — retry" }, 2800);
+    }
+    return;
+  }
+
+  const cleanKey = sanitizeApiKeys(trimmed).join(", ");
   settings.userApiKey = cleanKey;
   saveSettings({ userApiKey: cleanKey });
-
-  showHud(
-    {
-      mode: "result",
-      detected_type: "DIRECT_VALUE",
-      cursor_pill: cleanKey ? "Personal key active" : "Cloud pool active",
-      key_source: cleanKey ? "BYOK" : "POOL",
-      elapsed: "✓",
-    },
-    2200
-  );
-
   syncSidecar();
+
+  if (!cleanKey) {
+    showHud(
+      {
+        mode: "result",
+        detected_type: "DIRECT_VALUE",
+        cursor_pill: "Cloud pool active",
+        key_source: "POOL",
+        elapsed: "✓",
+      },
+      2200
+    );
+    return;
+  }
+
+  showHud({ mode: "loading", cursor_pill: "•••" });
+  const t0 = Date.now();
+  const check = await executeDirectByok(
+    cleanKey,
+    'Return ONLY JSON: {"verification":"ok","detected_type":"DIRECT_VALUE","cursor_pill":"Key verified ✓","copy_value":"","expanded_note":""}',
+    null,
+    "solve"
+  );
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1) + "s";
+
+  if (check && check.detected_type !== "ERROR") {
+    showHud(
+      {
+        mode: "result",
+        detected_type: "DIRECT_VALUE",
+        cursor_pill: "Personal key verified ✓",
+        key_source: "BYOK",
+        elapsed,
+      },
+      2600
+    );
+  } else {
+    showHud(
+      {
+        mode: "error",
+        cursor_pill: (check && check.cursor_pill) || "Invalid key (Alt+K)",
+        key_source: "BYOK",
+        elapsed,
+      },
+      3600
+    );
+  }
 });
 
 ipcMain.on("hud-copy", (_event, text) => {
@@ -1477,41 +2153,213 @@ ipcMain.on("hud-close-sidecar", () => {
   }
 });
 
-ipcMain.on("hud-hide", dismissAllOverlays);
+ipcMain.on("hud-hide", hideOverlaysOnly);
+
+ipcMain.on("hud-open-update", () => {
+  const info = getUpdateInfo();
+  if (info.url && info.url.startsWith("https://")) {
+    shell.openExternal(info.url);
+  }
+});
+
+ipcMain.on("hud-dismiss-update", (_event, ver) => {
+  if (typeof ver === "string" && ver.trim()) {
+    saveSettings({ dismissedUpdateVersion: cleanVersionString(ver) });
+    syncSidecar();
+  }
+});
+
+ipcMain.on("hud-check-update", () => {
+  syncRemoteConfigAndUpdates(true);
+});
+
+ipcMain.handle("shortcuts-get", () => ({
+  shortcuts: settings.shortcuts,
+  labels: SHORTCUT_LABELS,
+  failed: Array.from(failedShortcuts),
+}));
+
+ipcMain.handle("shortcuts-save", (_event, nextMap) => {
+  saveSettings({ shortcuts: sanitizeShortcutsMap(nextMap) });
+  registerAllShortcuts();
+  const clashes = Array.from(failedShortcuts);
+  if (shortcutWin && !shortcutWin.isDestroyed()) {
+    globalShortcut.unregisterAll();
+    escRegistered = false;
+  }
+  rebuildTrayMenu();
+  return { ok: true, shortcuts: settings.shortcuts, failed: clashes };
+});
+
+ipcMain.handle("shortcuts-reset", () => {
+  saveSettings({ shortcuts: { ...DEFAULT_SHORTCUTS } });
+  registerAllShortcuts();
+  const clashes = Array.from(failedShortcuts);
+  if (shortcutWin && !shortcutWin.isDestroyed()) {
+    globalShortcut.unregisterAll();
+    escRegistered = false;
+  }
+  rebuildTrayMenu();
+  return { ok: true, shortcuts: settings.shortcuts, failed: clashes };
+});
+
+ipcMain.on("shortcuts-close", () => {
+  if (shortcutWin && !shortcutWin.isDestroyed()) {
+    shortcutWin.close();
+  }
+});
+
+function getActionHandlers() {
+  return {
+    smartScan: handleInstantScan,
+    smartScanAlt: handleInstantScan,
+    twoCornerSnip: handleTwoCornerSnip,
+    twoCornerSnipAlt: handleTwoCornerSnip,
+    solveText: () => handleTextAction("solve"),
+    rewriteText: () => handleTextAction("rewrite"),
+    explainText: () => handleTextAction("explain"),
+    ghostPaste: ghostPasteActiveValue,
+    spotlight: () => openSpotlight("ask"),
+    followup: () => openSpotlight("followup"),
+    apiKey: () => openSpotlight("key"),
+    sidecar: toggleSidecar,
+    pinHud: () => {
+      isPinned = !isPinned;
+      clearTimeout(hideTimer);
+      if (history[historyIdx]) {
+        showHud(history[historyIdx], 0);
+      } else if (!isPinned && hudWin && !hudWin.isDestroyed()) {
+        if (hudWin.isVisible()) startCursorFollow();
+      }
+    },
+    cycleHistory: () => {
+      if (!history.length) return;
+      const visible = hudWin && !hudWin.isDestroyed() && hudWin.isVisible();
+      if (!visible) {
+        historyIdx = 0;
+      } else {
+        historyIdx = (historyIdx + 1) % history.length;
+      }
+      showHud(history[historyIdx], 8500);
+      syncSidecar();
+    },
+    hideOnly: hideOverlaysOnly,
+    forceReset: forceResetAll,
+  };
+}
+
+function registerAllShortcuts() {
+  globalShortcut.unregisterAll();
+  escRegistered = false;
+  failedShortcuts.clear();
+
+  const handlers = getActionHandlers();
+  const seenAccels = new Set();
+
+  for (const [id, handler] of Object.entries(handlers)) {
+    const accel = String(settings.shortcuts[id] || "").trim();
+    if (!accel) continue;
+    const norm = accel.toLowerCase();
+    if (seenAccels.has(norm)) {
+      failedShortcuts.add(id);
+      continue;
+    }
+    try {
+      const ok = globalShortcut.register(accel, handler);
+      if (ok) {
+        seenAccels.add(norm);
+      } else {
+        failedShortcuts.add(id);
+      }
+    } catch (_) {
+      failedShortcuts.add(id);
+    }
+  }
+  syncEscapeShortcut();
+}
+
+function fmtKey(id) {
+  return settings.shortcuts[id] || "Off";
+}
+
+function rebuildTrayMenu() {
+  if (!tray) return;
+
+  const info = getUpdateInfo();
+
+  const packSubmenu = Object.entries(modePacks).map(([id, pack]) => ({
+    label: pack.label || id,
+    type: "radio",
+    checked: settings.activePack === id,
+    click: () => {
+      saveSettings({ activePack: id });
+      LOCAL_CACHE.clear();
+      rebuildTrayMenu();
+      showHud(
+        {
+          mode: "result",
+          detected_type: "DIRECT_VALUE",
+          cursor_pill: `Pack: ${pack.label || id}`,
+          elapsed: "✓",
+        },
+        2000
+      );
+    },
+  }));
+
+  const template = [
+    { label: `Cursor Companion v${info.currentVersion}`, enabled: false },
+  ];
+
+  if (info.available) {
+    template.push({
+      label: `⬇ Download Update (v${info.version})`,
+      click: () => shell.openExternal(info.url),
+    });
+  }
+
+  if (info.notice) {
+    template.push({
+      label: `ℹ ${info.notice.slice(0, 48)}`,
+      enabled: false,
+    });
+  }
+
+  template.push(
+    { type: "separator" },
+    { label: `Smart Scan (${fmtKey("smartScan")} / ${fmtKey("smartScanAlt")})`, click: () => handleInstantScan() },
+    { label: `2-Corner Snip (${fmtKey("twoCornerSnip")} / ${fmtKey("twoCornerSnipAlt")})`, click: () => handleTwoCornerSnip() },
+    { label: `Solve Selection (${fmtKey("solveText")})`, click: () => handleTextAction("solve") },
+    { label: `Rewrite Selection (${fmtKey("rewriteText")})`, click: () => handleTextAction("rewrite") },
+    { label: `Explain Selection (${fmtKey("explainText")})`, click: () => handleTextAction("explain") },
+    { type: "separator" },
+    { label: "Mode Packs", submenu: packSubmenu },
+    {
+      label:
+        failedShortcuts.size > 0
+          ? `⚠ Customize Shortcuts (${failedShortcuts.size} clash)...`
+          : "Customize Shortcuts...",
+      click: () => openShortcutEditor(),
+    },
+    { type: "separator" },
+    { label: `Spotlight Bar (${fmtKey("spotlight")})`, click: () => openSpotlight("ask") },
+    { label: `Study Sidecar (${fmtKey("sidecar")})`, click: () => toggleSidecar() },
+    { label: `Personal Key / Share Pro (${fmtKey("apiKey")})`, click: () => openSpotlight("key") },
+    { label: `Vanish Overlay (${fmtKey("hideOnly")})`, click: () => hideOverlaysOnly() },
+    { label: `Force Cancel / Reset (${fmtKey("forceReset")})`, click: () => forceResetAll() },
+    { type: "separator" },
+    { label: "Check for Updates...", click: () => syncRemoteConfigAndUpdates(true) },
+    { label: "Quit", click: () => app.quit() }
+  );
+
+  tray.setContextMenu(Menu.buildFromTemplate(template));
+}
 
 function createTray() {
   const icon = nativeImage.createEmpty();
-
   tray = new Tray(icon);
-  tray.setToolTip("Cursor Companion V3");
-  tray.setContextMenu(
-    Menu.buildFromTemplate([
-      { label: "Cursor Companion V3", enabled: false },
-      { type: "separator" },
-      { label: "Cursor Scan (Alt + A)", click: () => handleInstantScan() },
-      { label: "Region Snip (Alt + Q)", click: () => handleRegionSnip() },
-      { label: "Solve Selection (Alt + C)", click: () => handleTextAction("solve") },
-      { label: "Rewrite Selection (Alt + W)", click: () => handleTextAction("rewrite") },
-      { label: "Explain Selection (Alt + E)", click: () => handleTextAction("explain") },
-      { type: "separator" },
-      { label: "Spotlight Bar (Alt + G)", click: () => openSpotlight("ask") },
-      { label: "Study Sidecar (Alt + D)", click: () => toggleSidecar() },
-      { label: "Personal Key (Alt + K)", click: () => openSpotlight("key") },
-      { type: "separator" },
-      { label: "Quit", click: () => app.quit() },
-    ])
-  );
-}
-
-function registerShortcut(accelerator, handler) {
-  try {
-    const registered = globalShortcut.register(accelerator, handler);
-    if (!registered) {
-      console.warn(`Shortcut unavailable: ${accelerator}`);
-    }
-  } catch (error) {
-    console.error(`Unable to register ${accelerator}:`, error.message);
-  }
+  tray.setToolTip("Cursor Companion");
+  rebuildTrayMenu();
 }
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -1522,46 +2370,18 @@ if (!gotSingleInstanceLock) {
   app.whenReady()
     .then(() => {
       initSettingsPath();
+      loadModePacks();
+      loadCachedRemoteConfig();
       settings = loadSettings();
       saveSettings({});
 
       createHudWindow();
+      registerAllShortcuts();
       createTray();
-      warmBackend();
 
-      keepAliveTimer = setInterval(warmBackend, 240000);
-
-      registerShortcut("Alt+A", handleInstantScan);
-      registerShortcut("Alt+Q", handleRegionSnip);
-      registerShortcut("Alt+C", () => handleTextAction("solve"));
-      registerShortcut("Alt+W", () => handleTextAction("rewrite"));
-      registerShortcut("Alt+E", () => handleTextAction("explain"));
-
-      registerShortcut("Alt+Enter", ghostPasteActiveValue);
-      registerShortcut("Alt+G", () => openSpotlight("ask"));
-      registerShortcut("Alt+F", () => openSpotlight("followup"));
-      registerShortcut("Alt+K", () => openSpotlight("key"));
-      registerShortcut("Alt+D", toggleSidecar);
-
-      registerShortcut("Alt+P", () => {
-        isPinned = !isPinned;
-        clearTimeout(hideTimer);
-
-        if (history[historyIdx]) {
-          showHud(history[historyIdx], 0);
-        } else if (!isPinned && hudWin && !hudWin.isDestroyed()) {
-          if (hudWin.isVisible()) startCursorFollow();
-        }
-      });
-
-      registerShortcut("Alt+H", () => {
-        if (!history.length) return;
-        historyIdx = (historyIdx + 1) % history.length;
-        showHud(history[historyIdx], 0);
-        syncSidecar();
-      });
-
-      registerShortcut("Alt+X", dismissAllOverlays);
+      // Silent startup check (4s delay so launch is instant) + once every 6 hours (zero server spam)
+      setTimeout(() => syncRemoteConfigAndUpdates(false), 4000);
+      updateCheckTimer = setInterval(() => syncRemoteConfigAndUpdates(false), 6 * 60 * 60 * 1000);
     })
     .catch((error) => {
       console.error("Application startup failed:", error);
@@ -1571,7 +2391,9 @@ if (!gotSingleInstanceLock) {
 
 app.on("will-quit", () => {
   clearTimeout(hideTimer);
-  clearInterval(keepAliveTimer);
+  clearTimeout(busyWatchdog);
+  clearTimeout(snipCornerTimer);
+  clearInterval(updateCheckTimer);
   stopCursorFollow();
   globalShortcut.unregisterAll();
 });

@@ -2137,14 +2137,55 @@ ipcMain.on("hud-save-key", async (_event, key) => {
   LOCAL_CACHE.clear();
 
   const trimmed = key.trim();
-  if (trimmed.toLowerCase().startsWith("share:")) {
-    const sharedKey = trimmed.slice(6).trim();
+  if (/^share\s*:/i.test(trimmed)) {
+    const rawList = trimmed.replace(/^share\s*:/i, "").replace(/[<>]/g, " ");
+    const sharedKeys = Array.from(new Set(sanitizeApiKeys(rawList))).slice(0, 10);
+
+    if (!sharedKeys.length) {
+      showHud(
+        {
+          mode: "error",
+          cursor_pill: "Use Share:<KEY1,KEY2,...>",
+          key_source: "POOL",
+        },
+        3200
+      );
+      return;
+    }
+
     showHud({ mode: "loading", cursor_pill: "•••" });
+
     try {
-      const resp = await postJsonWithJitterRetry("/v3_1/contribute-key", {
-        api_key: sharedKey,
+      let resp = await postJsonWithJitterRetry("/v3_1/contribute-keys", {
+        api_keys: sharedKeys,
         device_id: settings.deviceId,
       });
+
+      // Fail-safe fallback if backend only has the legacy single-key endpoint
+      if (!resp || resp.detail === "Not Found") {
+        let added = 0;
+        let lastMsg = "";
+        for (const k of sharedKeys) {
+          const single = await postJsonWithJitterRetry("/v3_1/contribute-key", {
+            api_key: k,
+            device_id: settings.deviceId,
+          });
+          if (single && single.ok) {
+            added += 1;
+            lastMsg = single.message || lastMsg;
+          }
+        }
+        resp = {
+          ok: added > 0,
+          added_count: added,
+          total_submitted: sharedKeys.length,
+          message:
+            added > 0
+              ? `Shared ${added}/${sharedKeys.length} keys · Pro Unlocked`
+              : "No valid keys verified",
+        };
+      }
+
       if (resp && resp.ok) {
         settings.userApiKey = "";
         saveSettings({ userApiKey: "" });
@@ -2153,30 +2194,30 @@ ipcMain.on("hud-save-key", async (_event, key) => {
           {
             mode: "result",
             detected_type: "DIRECT_VALUE",
-            cursor_pill: resp.message || "Pro Pool Unlocked",
+            cursor_pill: resp.message || `Shared ${resp.added_count || sharedKeys.length} keys · Pro Unlocked`,
             key_source: "PRO",
             elapsed: "✓",
           },
-          3200
+          3800
         );
       } else {
         showHud(
           {
             mode: "error",
-            cursor_pill: (resp && resp.message) || "Could not verify shared key",
+            cursor_pill: (resp && resp.message) || "Could not verify shared keys",
             key_source: "POOL",
           },
-          3400
+          3600
         );
       }
     } catch (_) {
       showHud(
         {
           mode: "error",
-          cursor_pill: "Share check failed — retry",
+          cursor_pill: "Multi-key share failed — retry",
           key_source: "POOL",
         },
-        2800
+        3000
       );
     }
     return;

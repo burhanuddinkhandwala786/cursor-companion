@@ -1,14 +1,13 @@
-name: Build Windows Release (V3)
+name: Build & Publish Windows Release
 
 on:
-  push:
-    branches:
-      - v3
-      - v3.1-beta
-    paths-ignore:
-      - "README.md"
-      - "docs/**"
   workflow_dispatch:
+    inputs:
+      summary:
+        description: "What changed in this release?"
+        required: false
+        default: "UI polish, bug fixes, and stability improvements."
+        type: string
 
 permissions:
   contents: write
@@ -35,32 +34,24 @@ jobs:
           node --check main.js
           if (Test-Path preload.js) { node --check preload.js }
 
-      - name: Resolve release target from branch and package.json
+      - name: Read version from package.json
         id: meta
         shell: pwsh
         run: |
           $pkg = Get-Content -Raw -Path package.json | ConvertFrom-Json
           $ver = $pkg.version.Trim()
-          $branch = $env:GITHUB_REF_NAME
-
-          if ($branch -eq "v3") {
-            "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            "release_name=Cursor Companion V$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            "prerelease=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            "make_latest=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          } else {
-            "tag=v$ver-beta" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            "release_name=Cursor Companion V$ver Beta" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            "prerelease=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-            "make_latest=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          }
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "release_name=Cursor Companion V$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Build Windows NSIS installer
         shell: pwsh
         run: npx electron-builder --win --x64 --publish never
 
-      - name: Verify installer and write SHA-256 summary
+      - name: Generate exact SHA-256 release notes
         shell: pwsh
+        env:
+          USER_SUMMARY: ${{ inputs.summary }}
         run: |
           $exe = Get-ChildItem -Path dist -Filter "*.exe" | Select-Object -First 1
           if (-not $exe) {
@@ -68,16 +59,33 @@ jobs:
             exit 1
           }
           $hash = (Get-FileHash -Path $exe.FullName -Algorithm SHA256).Hash.ToLower()
-          "### Windows Installer Built" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "- **File:** $($exe.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "- **Tag:** ${{ steps.meta.outputs.tag }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "- **SHA-256:** ``$hash``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $ver = "${{ steps.meta.outputs.version }}"
+          $bt = [char]96
 
-      - name: Publish or update GitHub Release
-        uses: softprops/action-gh-release@v2
+          $notes = @(
+            "## What's New in Cursor Companion v$ver"
+            ""
+            "$env:USER_SUMMARY"
+            ""
+            "### Verification & Trust"
+            "- **File:** $bt$($exe.Name)$bt"
+            "- **SHA-256:** $bt$hash$bt"
+            "- **SmartScreen Note:** Unsigned open-source student build — click **More info -> Run anyway** to install, or verify the SHA-256 hash above directly on [VirusTotal](https://www.virustotal.com/gui/home/search)."
+          ) -join "`n"
+
+          Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+
+          "### Release Built Successfully" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **File:** $($exe.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **Tag:** v$ver" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **SHA-256:** $bt$hash$bt" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Publish Latest GitHub Release
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: ${{ steps.meta.outputs.release_name }}
-          prerelease: ${{ steps.meta.outputs.prerelease }}
-          make_latest: ${{ steps.meta.outputs.make_latest }}
+          body_path: release-notes.md
+          prerelease: false
+          make_latest: true
           files: dist/*.exe

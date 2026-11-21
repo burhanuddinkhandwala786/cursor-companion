@@ -52,8 +52,8 @@ let history = [];
 let historyIdx = -1;
 let lastContextSummary = "";
 let lastGoodByok = null;
-let lockedW = 62;
-let lockedH = 30;
+let lockedW = 68;
+let lockedH = 34;
 let lastWinX = -9999;
 let lastWinY = -9999;
 
@@ -90,22 +90,22 @@ const DEFAULT_SHORTCUTS = {
 };
 
 const SHORTCUT_LABELS = [
-  ["smartScan", "Smart Screen Scan (Primary)"],
-  ["smartScanAlt", "Smart Screen Scan (Alt Alias)"],
-  ["twoCornerSnip", "2-Corner Zero-Focus Snip (Primary)"],
-  ["twoCornerSnipAlt", "2-Corner Snip (Alt Alias)"],
-  ["solveText", "Solve Highlighted Text"],
-  ["rewriteText", "Rewrite Highlighted Text"],
-  ["explainText", "Explain Highlighted Text"],
-  ["hideOnly", "Vanish / Hide Overlay Only (No Reset)"],
-  ["forceReset", "Force Cancel & Reset Stuck Scan"],
-  ["sidecar", "Toggle Study Sidecar History"],
-  ["spotlight", "Open Spotlight Ask Bar"],
-  ["followup", "Ask Follow-Up on Last Answer"],
-  ["apiKey", "Personal API Key / Pro Share"],
-  ["pinHud", "Pin / Unpin HUD Pill"],
-  ["cycleHistory", "Show Last / Cycle Answers"],
-  ["ghostPaste", "Ghost Paste Active Answer"],
+  ["smartScan", "Smart Screen Scan", "Capture & Vision"],
+  ["smartScanAlt", "Smart Screen Scan (Alt)", "Capture & Vision"],
+  ["twoCornerSnip", "2-Corner Zero-Focus Snip", "Capture & Vision"],
+  ["twoCornerSnipAlt", "2-Corner Snip (Alt)", "Capture & Vision"],
+  ["solveText", "Solve Highlighted Text", "Capture & Vision"],
+  ["rewriteText", "Rewrite Highlighted Text", "Capture & Vision"],
+  ["explainText", "Explain Highlighted Text", "Capture & Vision"],
+  ["hideOnly", "Vanish Overlay Only", "Overlay & History"],
+  ["cycleHistory", "Recall / Cycle Answers", "Overlay & History"],
+  ["pinHud", "Pin / Unpin HUD Pill", "Overlay & History"],
+  ["sidecar", "Study Sidecar Panel", "Overlay & History"],
+  ["ghostPaste", "Ghost Paste Answer", "Overlay & History"],
+  ["forceReset", "Force Cancel & Reset", "Overlay & History"],
+  ["spotlight", "Spotlight Command Bar", "Intelligence & Keys"],
+  ["followup", "Follow-Up on Last Answer", "Intelligence & Keys"],
+  ["apiKey", "Personal API Key / Pro Pool", "Intelligence & Keys"],
 ];
 
 let settings = {
@@ -418,7 +418,7 @@ function isNewerVersion(remoteVer, currentVer) {
 }
 
 function getUpdateInfo() {
-  const currentVersion = cleanVersionString(app.getVersion() || "3.1.0");
+  const currentVersion = cleanVersionString(app.getVersion() || "3.1.1");
   const latest = cleanVersionString(remoteConfig.latest_version || "");
   const available = isNewerVersion(latest, currentVersion);
   return {
@@ -457,7 +457,14 @@ function beginRequest() {
   busyWatchdog = setTimeout(() => {
     if (activeRequestId === reqId && isBusy) {
       isBusy = false;
-      showHud({ mode: "error", cursor_pill: "Timed out — retry scan" }, 2400);
+      showHud(
+        {
+          mode: "error",
+          cursor_pill: "Timed out — retry scan",
+          key_source: settings.userApiKey ? "BYOK" : "POOL",
+        },
+        2400
+      );
     }
   }, 21000);
   return reqId;
@@ -609,7 +616,6 @@ function httpsGetJson(urlStr, timeoutMs = 9000) {
   });
 }
 
-// Dual-source fail-safe sync: checks Render /v3_1/config AND falls back to GitHub Releases API
 async function syncRemoteConfigAndUpdates(manual = false) {
   let fetched = false;
 
@@ -621,12 +627,11 @@ async function syncRemoteConfigAndUpdates(manual = false) {
     }
   } catch (_) {}
 
-  // Fail-safe fallback to GitHub Releases API if Render is sleeping or older
   try {
     const gh = await httpsGetJson(GITHUB_RELEASES_API, 8000);
     if (gh && typeof gh === "object" && gh.tag_name) {
       const ghVer = cleanVersionString(gh.tag_name);
-      if (isNewerVersion(ghVer, remoteConfig.latest_version || app.getVersion() || "3.1.0")) {
+      if (isNewerVersion(ghVer, remoteConfig.latest_version || app.getVersion() || "3.1.1")) {
         mergeRemoteConfig({
           latest_version: ghVer,
           release_url:
@@ -656,8 +661,7 @@ async function syncRemoteConfigAndUpdates(manual = false) {
       showHud(
         {
           mode: "update",
-          cursor_pill: `↑ v${info.version} ready · Press Alt+D or Tray to update`,
-          elapsed: "NEW",
+          cursor_pill: `v${info.version} ready · Alt+D or Tray to update`,
         },
         5500
       );
@@ -666,7 +670,7 @@ async function syncRemoteConfigAndUpdates(manual = false) {
     showHud(
       {
         mode: "result",
-        cursor_pill: `Up to date (v${info.currentVersion}) ✓`,
+        cursor_pill: `Up to date (v${info.currentVersion})`,
         elapsed: "✓",
       },
       2600
@@ -1036,8 +1040,8 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
 
 function createHudWindow() {
   const win = new BrowserWindow({
-    width: 62,
-    height: 30,
+    width: 68,
+    height: 34,
     useContentSize: true,
     frame: false,
     transparent: true,
@@ -1130,19 +1134,18 @@ function showHud(payload, autoHideMs = 0) {
 
   const isLoading = payload.mode === "loading";
   const textLen = String(payload.cursor_pill || "").length;
-  const badgeReserve =
-    payload.key_source === "BYOK" ||
-    payload.key_source === "BYOK_CACHE" ||
-    payload.key_source === "CACHE" ||
-    payload.key_source === "PRO" ||
-    payload.mode === "update"
-      ? 86
-      : 68;
+  const hasBadge = Boolean(payload.key_source || payload.mode === "update");
+  const hasElapsed = Boolean(payload.elapsed);
+  const extraWidth =
+    42 +
+    (hasBadge ? 64 : 0) +
+    (hasElapsed ? 38 : 0) +
+    (isPinned ? 12 : 0);
 
   lockedW = isLoading
-    ? 62
-    : Math.max(132, Math.min(410, Math.round(textLen * 7.6 + badgeReserve)));
-  lockedH = 30;
+    ? 68
+    : Math.max(152, Math.min(460, Math.round(textLen * 7.6 + extraWidth)));
+  lockedH = 34;
 
   hudWin.setFocusable(false);
   hudWin.setIgnoreMouseEvents(true, { forward: true });
@@ -1202,8 +1205,8 @@ function openSpotlight(initialMode = "ask") {
   const pt = screen.getCursorScreenPoint();
   const wa = screen.getDisplayNearestPoint(pt).workArea;
 
-  const width = 480;
-  const height = 56;
+  const width = 520;
+  const height = 60;
   const x = Math.round(wa.x + (wa.width - width) / 2);
   const y = Math.round(wa.y + 48);
 
@@ -1297,8 +1300,8 @@ function toggleSidecar() {
   const pt = screen.getCursorScreenPoint();
   const wa = screen.getDisplayNearestPoint(pt).workArea;
 
-  const width = 296;
-  const height = Math.max(1, Math.min(520, wa.height - 48));
+  const width = 312;
+  const height = Math.max(1, Math.min(540, wa.height - 48));
   const x = Math.round(wa.x + wa.width - width - 14);
   const y = Math.round(wa.y + 24);
 
@@ -1376,13 +1379,13 @@ function syncSidecar() {
       history,
       activeIdx: historyIdx,
       hasUserKey: Boolean(settings.userApiKey),
-      appVersion: cleanVersionString(app.getVersion() || "3.1.0"),
+      appVersion: cleanVersionString(app.getVersion() || "3.1.1"),
       updateInfo: getUpdateInfo(),
     });
   }
 }
 
-// --- Built-in GUI Shortcut Customizer (Matching Obsidian / Apple / Omega Theme) ---
+// --- Frameless Obsidian Shortcut Studio (Apple / Mercedes / Tesla Aesthetic) ---
 function ensureShortcutEditorAssets() {
   const preloadCode = [
     'const { contextBridge, ipcRenderer } = require("electron");',
@@ -1395,39 +1398,67 @@ function ensureShortcutEditorAssets() {
   ].join("\n");
 
   const editorHtml = [
-    "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Customize Shortcuts</title>",
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Keyboard Shortcuts</title>",
     "<style>",
-    "*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI Variable','Segoe UI',sans-serif}",
-    "body{background:#000;color:#f5f5f7;padding:22px 20px;user-select:none;-webkit-font-smoothing:antialiased}",
-    "h2{font-size:17px;font-weight:700;letter-spacing:-0.03em;margin-bottom:4px}",
-    ".sub{font-size:12px;color:#86868b;margin-bottom:16px}",
-    ".list{max-height:366px;overflow-y:auto;border:1px solid rgba(255,255,255,0.12);border-radius:16px;background:#161617}",
-    ".list::-webkit-scrollbar{width:5px}.list::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.16);border-radius:5px}",
-    ".row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.08);gap:10px}",
+    "*{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Segoe UI Variable','Segoe UI',system-ui,sans-serif}",
+    "html,body{width:100%;height:100%;overflow:hidden;background:transparent;color:#f5f5f7;user-select:none;-webkit-font-smoothing:antialiased}",
+    "body{padding:4px}",
+    ".panel{width:100%;height:100%;display:flex;flex-direction:column;border-radius:22px;background:linear-gradient(180deg,#18181b 0%,#0b0b0d 100%);border:1px solid rgba(255,255,255,0.14);box-shadow:0 0 0 1px rgba(0,0,0,0.82),inset 0 1px 0 rgba(255,255,255,0.12);overflow:hidden}",
+    ".top{-webkit-app-region:drag;display:flex;align-items:center;justify-content:space-between;padding:18px 20px 14px;border-bottom:1px solid rgba(255,255,255,0.08)}",
+    ".brand{display:flex;align-items:center;gap:10px}",
+    ".mark{width:13px;height:13px;background:#f5f5f7;clip-path:polygon(0 0,100% 62%,56% 68%,78% 100%,58% 100%,38% 72%,0 90%)}",
+    ".title-wrap h2{font-size:15px;font-weight:600;letter-spacing:-0.025em;line-height:1.15}",
+    ".title-wrap p{font-size:11.5px;color:#86868b;margin-top:2px}",
+    ".close{-webkit-app-region:no-drag;width:28px;height:28px;border-radius:50%;border:1px solid rgba(255,255,255,0.09);background:rgba(255,255,255,0.06);color:#a1a1a6;font-size:15px;cursor:pointer;display:grid;place-items:center;transition:background 0.15s,color 0.15s}",
+    ".close:hover{background:rgba(255,255,255,0.16);color:#fff}",
+    ".scroll{flex:1;overflow-y:auto;padding:14px 18px 8px;display:flex;flex-direction:column;gap:16px}",
+    ".scroll::-webkit-scrollbar{width:5px}.scroll::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:999px}",
+    ".grp-title{font-size:10.5px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#6e6e73;padding:0 4px 7px}",
+    ".grp-box{border-radius:16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);overflow:hidden}",
+    ".row{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid rgba(255,255,255,0.06);gap:12px;transition:background 0.14s}",
     ".row:last-child{border-bottom:none}",
-    ".lbl{font-size:12.5px;color:#d2d2d7;letter-spacing:-0.01em}",
-    ".ctrl{display:flex;align-items:center;gap:6px}",
-    ".keybtn{min-width:130px;height:30px;padding:0 11px;border-radius:9px;border:1px solid rgba(255,255,255,0.14);background:linear-gradient(180deg,#3a3a3c,#2a2a2c);box-shadow:0 2px 0 #0a0a0a,inset 0 1px 0 rgba(255,255,255,0.12);color:#f5f5f7;font-size:12px;font-weight:600;cursor:pointer;text-align:center}",
-    ".keybtn.rec{border-color:#2997ff;background:#0071e3;color:#fff;box-shadow:0 0 12px rgba(41,151,255,0.45)}",
-    ".keybtn.clash{border-color:rgba(255,159,10,0.65);color:#ffd60a}",
-    ".clr{height:28px;padding:0 9px;border-radius:980px;border:1px solid rgba(255,255,255,0.12);background:transparent;color:#86868b;font-size:11px;cursor:pointer}",
-    ".clr:hover{color:#fff;border-color:rgba(255,255,255,0.3)}",
-    ".bar{display:flex;justify-content:space-between;align-items:center;margin-top:16px;gap:8px}",
-    ".btn{padding:9px 16px;border-radius:980px;border:1px solid rgba(255,255,255,0.14);background:#1c1c1e;color:#f5f5f7;font-size:12.5px;font-weight:500;cursor:pointer}",
-    ".btn:hover{background:#2c2c2e}",
-    ".btn.primary{background:#0071e3;border-color:#0071e3;color:#fff}",
+    ".row:hover{background:rgba(255,255,255,0.03)}",
+    ".lbl{font-size:12.5px;font-weight:450;color:#e5e5ea;letter-spacing:-0.01em}",
+    ".ctrl{display:flex;align-items:center;gap:7px}",
+    ".keybtn{min-width:136px;height:30px;padding:0 10px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.04);color:#f5f5f7;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px;transition:border-color 0.15s,background 0.15s}",
+    ".keybtn:hover{border-color:rgba(255,255,255,0.22);background:rgba(255,255,255,0.08)}",
+    ".keybtn.rec{border-color:rgba(10,132,255,0.8);background:rgba(10,132,255,0.14);color:#7dc4ff}",
+    ".keybtn.clash{border-color:rgba(255,179,64,0.6);background:rgba(255,179,64,0.08)}",
+    ".cap{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:20px;padding:0 6px;border-radius:6px;font-size:11px;font-weight:600;color:#f5f5f7;background:linear-gradient(180deg,#323236 0%,#222225 100%);border:1px solid rgba(255,255,255,0.14);box-shadow:inset 0 1px 0 rgba(255,255,255,0.12)}",
+    ".plus{font-size:10px;color:#6e6e73;font-weight:500}",
+    ".off-txt{font-size:11px;color:#6e6e73;font-weight:500}",
+    ".rec-txt{font-size:11px;color:#7dc4ff;font-weight:500;letter-spacing:0.01em}",
+    ".clash-tag{font-size:9px;font-weight:600;color:#ffb340;margin-left:3px;text-transform:uppercase}",
+    ".clr{width:24px;height:24px;border-radius:50%;border:1px solid transparent;background:transparent;color:#6e6e73;font-size:13px;cursor:pointer;display:grid;place-items:center;transition:all 0.15s}",
+    ".clr:hover{background:rgba(255,255,255,0.09);color:#fff}",
+    ".clr.dim{opacity:0.25;pointer-events:none}",
+    ".foot{padding:12px 18px 16px;border-top:1px solid rgba(255,255,255,0.08);background:rgba(0,0,0,0.22)}",
+    ".msg{font-size:11.5px;color:#34d399;min-height:16px;margin-bottom:10px;padding:0 2px}",
+    ".msg.warn{color:#ffb340}",
+    ".bar{display:flex;justify-content:space-between;align-items:center;gap:8px}",
+    ".btn{height:34px;padding:0 16px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.06);color:#e5e5ea;font-size:12px;font-weight:500;cursor:pointer;transition:background 0.15s,border-color 0.15s}",
+    ".btn:hover{background:rgba(255,255,255,0.13);border-color:rgba(255,255,255,0.2)}",
+    ".btn.primary{background:#0071e3;border-color:#0071e3;color:#fff;font-weight:600}",
     ".btn.primary:hover{background:#0077ed}",
-    ".msg{font-size:12px;color:#30d158;min-height:17px;margin-top:10px}",
     "</style></head><body>",
-    "<h2>Customize Shortcuts</h2>",
-    "<div class='sub'>Click any keycap, then press your combo. Click Clear to disable a clashing hotkey.</div>",
-    "<div class='list' id='list'></div>",
-    "<div class='msg' id='msg'></div>",
-    "<div class='bar'>",
-    "  <button class='btn' id='resetBtn'>Reset Defaults</button>",
-    "  <div style='display:flex;gap:8px'>",
-    "    <button class='btn' id='closeBtn'>Close</button>",
-    "    <button class='btn primary' id='saveBtn'>Save & Apply</button>",
+    "<div class='panel'>",
+    "  <div class='top'>",
+    "    <div class='brand'>",
+    "      <span class='mark'></span>",
+    "      <div class='title-wrap'><h2>Keyboard Shortcuts</h2><p>Click any keycap to rebind, or × to disable</p></div>",
+    "    </div>",
+    "    <button class='close' id='topClose' type='button' title='Close'>×</button>",
+    "  </div>",
+    "  <div class='scroll' id='list'></div>",
+    "  <div class='foot'>",
+    "    <div class='msg' id='msg'></div>",
+    "    <div class='bar'>",
+    "      <button class='btn' id='resetBtn' type='button'>Reset Defaults</button>",
+    "      <div style='display:flex;gap:8px'>",
+    "        <button class='btn' id='closeBtn' type='button'>Cancel</button>",
+    "        <button class='btn primary' id='saveBtn' type='button'>Save &amp; Apply</button>",
+    "      </div>",
+    "    </div>",
     "  </div>",
     "</div>",
     "<script>",
@@ -1455,26 +1486,59 @@ function ensureShortcutEditorAssets() {
     "  if (mods.length === 0 && !/^F([1-9]|1[0-2])$/.test(main)) return null;",
     "  return mods.concat([main]).join('+');",
     "}",
+    "function formatCap(tok) {",
+    "  if (tok === 'Control') return 'Ctrl';",
+    "  if (tok === 'Super') return 'Win';",
+    "  return tok;",
+    "}",
+    "function fillKeyButton(btn, id, val) {",
+    "  btn.textContent = '';",
+    "  if (activeKey === id) {",
+    "    const s = document.createElement('span'); s.className = 'rec-txt'; s.textContent = 'Press keys...'; btn.appendChild(s); return;",
+    "  }",
+    "  if (!val) {",
+    "    const s = document.createElement('span'); s.className = 'off-txt'; s.textContent = 'Disabled'; btn.appendChild(s); return;",
+    "  }",
+    "  const parts = val.split('+').filter(Boolean);",
+    "  parts.forEach((p, i) => {",
+    "    if (i > 0) { const pl = document.createElement('span'); pl.className = 'plus'; pl.textContent = '+'; btn.appendChild(pl); }",
+    "    const cap = document.createElement('span'); cap.className = 'cap'; cap.textContent = formatCap(p); btn.appendChild(cap);",
+    "  });",
+    "  if (failed.has(id)) { const cl = document.createElement('span'); cl.className = 'clash-tag'; cl.textContent = 'Clash'; btn.appendChild(cl); }",
+    "}",
     "function render() {",
     "  const list = document.getElementById('list');",
     "  list.textContent = '';",
-    "  labels.forEach(([id, title]) => {",
-    "    const row = document.createElement('div'); row.className = 'row';",
-    "    const lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = title;",
-    "    const ctrl = document.createElement('div'); ctrl.className = 'ctrl';",
-    "    const btn = document.createElement('button');",
-    "    const val = state[id] || '';",
-    "    btn.className = 'keybtn' + (activeKey === id ? ' rec' : '') + (failed.has(id) ? ' clash' : '');",
-    "    btn.textContent = activeKey === id ? 'Press keys...' : (val || 'Disabled') + (failed.has(id) ? ' (Clash)' : '');",
-    "    btn.onclick = () => { activeKey = (activeKey === id ? null : id); render(); };",
-    "    const clr = document.createElement('button'); clr.className = 'clr'; clr.textContent = 'Clear';",
-    "    clr.onclick = () => { state[id] = ''; activeKey = null; failed.delete(id); render(); };",
-    "    ctrl.appendChild(btn); ctrl.appendChild(clr);",
-    "    row.appendChild(lbl); row.appendChild(ctrl); list.appendChild(row);",
+    "  const groups = new Map();",
+    "  labels.forEach(([id, title, grp]) => {",
+    "    const g = grp || 'Shortcuts';",
+    "    if (!groups.has(g)) groups.set(g, []);",
+    "    groups.get(g).push([id, title]);",
+    "  });",
+    "  groups.forEach((items, gName) => {",
+    "    const sec = document.createElement('div');",
+    "    const gt = document.createElement('div'); gt.className = 'grp-title'; gt.textContent = gName; sec.appendChild(gt);",
+    "    const box = document.createElement('div'); box.className = 'grp-box';",
+    "    items.forEach(([id, title]) => {",
+    "      const row = document.createElement('div'); row.className = 'row';",
+    "      const lbl = document.createElement('div'); lbl.className = 'lbl'; lbl.textContent = title;",
+    "      const ctrl = document.createElement('div'); ctrl.className = 'ctrl';",
+    "      const val = state[id] || '';",
+    "      const btn = document.createElement('button'); btn.type = 'button';",
+    "      btn.className = 'keybtn' + (activeKey === id ? ' rec' : '') + (failed.has(id) ? ' clash' : '');",
+    "      fillKeyButton(btn, id, val);",
+    "      btn.onclick = () => { activeKey = (activeKey === id ? null : id); render(); };",
+    "      const clr = document.createElement('button'); clr.type = 'button';",
+    "      clr.className = 'clr' + (val ? '' : ' dim'); clr.textContent = '×'; clr.title = 'Disable shortcut';",
+    "      clr.onclick = () => { state[id] = ''; activeKey = null; failed.delete(id); render(); };",
+    "      ctrl.appendChild(btn); ctrl.appendChild(clr);",
+    "      row.appendChild(lbl); row.appendChild(ctrl); box.appendChild(row);",
+    "    });",
+    "    sec.appendChild(box); list.appendChild(sec);",
     "  });",
     "}",
     "window.addEventListener('keydown', (e) => {",
-    "  if (!activeKey) return;",
+    "  if (!activeKey) { if (e.key === 'Escape') window.shortcutApi.close(); return; }",
     "  e.preventDefault(); e.stopPropagation();",
     "  const acc = keyToAccel(e);",
     "  if (acc === 'CANCEL') { activeKey = null; render(); return; }",
@@ -1483,16 +1547,20 @@ function ensureShortcutEditorAssets() {
     "document.getElementById('saveBtn').onclick = async () => {",
     "  const res = await window.shortcutApi.save(state);",
     "  state = res.shortcuts; failed = new Set(res.failed || []);",
-    "  document.getElementById('msg').textContent = failed.size ? 'Saved — highlighted items clashed with another app.' : 'Shortcuts saved and active.';",
+    "  const m = document.getElementById('msg');",
+    "  m.className = 'msg' + (failed.size ? ' warn' : '');",
+    "  m.textContent = failed.size ? 'Saved — amber shortcuts clashed with another app.' : 'Shortcuts saved and active.';",
     "  render();",
     "};",
     "document.getElementById('resetBtn').onclick = async () => {",
     "  const res = await window.shortcutApi.reset();",
     "  state = res.shortcuts; failed = new Set(res.failed || []);",
-    "  document.getElementById('msg').textContent = 'Reset to defaults.';",
+    "  const m = document.getElementById('msg'); m.className = 'msg';",
+    "  m.textContent = 'Restored default shortcuts.';",
     "  render();",
     "};",
     "document.getElementById('closeBtn').onclick = () => window.shortcutApi.close();",
+    "document.getElementById('topClose').onclick = () => window.shortcutApi.close();",
     "window.shortcutApi.getData().then((d) => { state = d.shortcuts; labels = d.labels; failed = new Set(d.failed || []); render(); });",
     "</script></body></html>",
   ].join("\n");
@@ -1514,15 +1582,19 @@ function openShortcutEditor() {
   escRegistered = false;
 
   const win = new BrowserWindow({
-    width: 520,
-    height: 530,
+    width: 560,
+    height: 600,
+    useContentSize: true,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    thickFrame: false,
+    hasShadow: false,
     resizable: false,
     minimizable: false,
     maximizable: false,
     alwaysOnTop: true,
-    title: "Cursor Companion — Customize Shortcuts",
-    backgroundColor: "#000000",
-    autoHideMenuBar: true,
+    title: "Cursor Companion — Shortcuts",
     webPreferences: {
       preload: SHORTCUT_PRELOAD_PATH,
       contextIsolation: true,
@@ -1836,7 +1908,14 @@ async function handleInstantScan() {
     handleResult(res, elapsed, "[Smart Screen Scan]");
   } catch (_) {
     if (activeRequestId === reqId) {
-      showHud({ mode: "error", cursor_pill: "Retry scan" }, 2400);
+      showHud(
+        {
+          mode: "error",
+          cursor_pill: "Retry scan",
+          key_source: settings.userApiKey ? "BYOK" : "POOL",
+        },
+        2400
+      );
     }
   } finally {
     finishRequest(reqId);
@@ -1887,7 +1966,14 @@ async function handleTwoCornerSnip() {
     handleResult(res, elapsed, "[2-Corner Snip]");
   } catch (_) {
     if (activeRequestId === reqId) {
-      showHud({ mode: "error", cursor_pill: "Retry snip" }, 2400);
+      showHud(
+        {
+          mode: "error",
+          cursor_pill: "Retry snip",
+          key_source: settings.userApiKey ? "BYOK" : "POOL",
+        },
+        2400
+      );
     }
   } finally {
     finishRequest(reqId);
@@ -1928,7 +2014,14 @@ async function handleTextAction(actionMode = "solve") {
     handleResult(res, elapsed, sourceLabel);
   } catch (_) {
     if (activeRequestId === reqId) {
-      showHud({ mode: "error", cursor_pill: "Retry hotkey" }, 2400);
+      showHud(
+        {
+          mode: "error",
+          cursor_pill: "Retry hotkey",
+          key_source: settings.userApiKey ? "BYOK" : "POOL",
+        },
+        2400
+      );
     }
   } finally {
     finishRequest(reqId);
@@ -1936,6 +2029,7 @@ async function handleTextAction(actionMode = "solve") {
 }
 
 function handleResult(res, elapsed, sourceContext) {
+  const defaultSrc = settings.userApiKey ? "BYOK" : "POOL";
   if (
     !res ||
     typeof res !== "object" ||
@@ -1949,7 +2043,7 @@ function handleResult(res, elapsed, sourceContext) {
         cursor_pill:
           (res && typeof res.cursor_pill === "string" && res.cursor_pill) ||
           "High traffic — retry",
-        key_source: (res && res.key_source) || undefined,
+        key_source: (res && res.key_source) || defaultSrc,
       },
       3200
     );
@@ -1961,6 +2055,7 @@ function handleResult(res, elapsed, sourceContext) {
 
   const item = {
     ...res,
+    key_source: res.key_source || defaultSrc,
     cursor_pill: String(res.cursor_pill),
     elapsed,
     mode: isUnclear ? "error" : "result",
@@ -2012,7 +2107,14 @@ async function processSpotlightQuery(_event, query) {
     handleResult(res, elapsed, query);
   } catch (_) {
     if (activeRequestId === reqId) {
-      showHud({ mode: "error", cursor_pill: "Retry Spotlight" }, 2400);
+      showHud(
+        {
+          mode: "error",
+          cursor_pill: "Retry Spotlight",
+          key_source: settings.userApiKey ? "BYOK" : "POOL",
+        },
+        2400
+      );
     }
   } finally {
     finishRequest(reqId);
@@ -2051,9 +2153,9 @@ ipcMain.on("hud-save-key", async (_event, key) => {
           {
             mode: "result",
             detected_type: "DIRECT_VALUE",
-            cursor_pill: resp.message || "Pro Pool Unlocked ✓",
+            cursor_pill: resp.message || "Pro Pool Unlocked",
             key_source: "PRO",
-            elapsed: "★",
+            elapsed: "✓",
           },
           3200
         );
@@ -2062,12 +2164,20 @@ ipcMain.on("hud-save-key", async (_event, key) => {
           {
             mode: "error",
             cursor_pill: (resp && resp.message) || "Could not verify shared key",
+            key_source: "POOL",
           },
           3400
         );
       }
     } catch (_) {
-      showHud({ mode: "error", cursor_pill: "Share check failed — retry" }, 2800);
+      showHud(
+        {
+          mode: "error",
+          cursor_pill: "Share check failed — retry",
+          key_source: "POOL",
+        },
+        2800
+      );
     }
     return;
   }
@@ -2086,7 +2196,7 @@ ipcMain.on("hud-save-key", async (_event, key) => {
         key_source: "POOL",
         elapsed: "✓",
       },
-      2200
+      2400
     );
     return;
   }
@@ -2095,7 +2205,7 @@ ipcMain.on("hud-save-key", async (_event, key) => {
   const t0 = Date.now();
   const check = await executeDirectByok(
     cleanKey,
-    'Return ONLY JSON: {"verification":"ok","detected_type":"DIRECT_VALUE","cursor_pill":"Key verified ✓","copy_value":"","expanded_note":""}',
+    'Return ONLY JSON: {"verification":"ok","detected_type":"DIRECT_VALUE","cursor_pill":"Key verified","copy_value":"","expanded_note":""}',
     null,
     "solve"
   );
@@ -2106,11 +2216,11 @@ ipcMain.on("hud-save-key", async (_event, key) => {
       {
         mode: "result",
         detected_type: "DIRECT_VALUE",
-        cursor_pill: "Personal key verified ✓",
+        cursor_pill: "Personal key verified",
         key_source: "BYOK",
         elapsed,
       },
-      2600
+      2800
     );
   } else {
     showHud(
@@ -2379,7 +2489,6 @@ if (!gotSingleInstanceLock) {
       registerAllShortcuts();
       createTray();
 
-      // Silent startup check (4s delay so launch is instant) + once every 6 hours (zero server spam)
       setTimeout(() => syncRemoteConfigAndUpdates(false), 4000);
       updateCheckTimer = setInterval(() => syncRemoteConfigAndUpdates(false), 6 * 60 * 60 * 1000);
     })

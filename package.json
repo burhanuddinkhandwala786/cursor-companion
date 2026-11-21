@@ -1,43 +1,52 @@
 {
   "name": "cursor-companion",
-  "productName": "Cursor Companion",
   "version": "3.1.0",
-  "description": "AI Study and Productivity Cursor Overlay",
+  "description": "Lightweight, zero-focus AI desktop HUD for Windows",
+  "author": "Burhanuddin Khandwala",
   "main": "main.js",
-  "author": {
-    "name": "Burhanuddin Khandwala",
-    "email": "burhanuddinkhandwala786@gmail.com"
-  },
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder --win nsis"
+    "build:win": "electron-builder --win --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "com.burhanuddin.cursorcompanion",
     "productName": "Cursor Companion",
-    "copyright": "Copyright © 2026 Burhanuddin Khandwala",
     "asar": true,
+    "publish": null,
+    "forceCodeSigning": false,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "package.json"
+    ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
-      "icon": "build/icon.ico",
-      "requestedExecutionLevel": "asInvoker",
-      "publisherName": "Burhanuddin Khandwala"
+      "verifyUpdateCodeSignature": false
     },
     "nsis": {
-      "oneClick": false,
+      "oneClick": true,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "shortcutName": "Cursor Companion",
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "${productName} Setup ${version}.${ext}"
     }
-  },
-  "devDependencies": {
-    "electron": "^33.0.0",
-    "electron-builder": "^25.1.8"
   }
 }

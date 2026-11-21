@@ -2465,10 +2465,95 @@ function rebuildTrayMenu() {
   tray.setContextMenu(Menu.buildFromTemplate(template));
 }
 
+function createMonochromeTrayIcon() {
+  try {
+    const size = 32;
+    const buf = Buffer.alloc(size * size * 4);
+    const poly = [
+      [8.7, 6.5],
+      [23.7, 17.5],
+      [17.2, 19.0],
+      [20.7, 25.5],
+      [17.7, 26.5],
+      [14.2, 20.0],
+      [8.7, 23.5],
+    ];
+
+    const pointInPoly = (px, py) => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i][0];
+        const yi = poly[i][1];
+        const xj = poly[j][0];
+        const yj = poly[j][1];
+        if (yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) {
+          inside = !inside;
+        }
+      }
+      return inside;
+    };
+
+    const half = 14.5;
+    const radius = 7.5;
+    const inner = half - radius;
+    const samples = 4;
+    const total = samples * samples;
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        let sumGray = 0;
+        let sumAlpha = 0;
+
+        for (let sy = 0; sy < samples; sy++) {
+          const py = y + (sy + 0.5) / samples;
+          const qy = Math.abs(py - 16) - inner;
+
+          for (let sx = 0; sx < samples; sx++) {
+            const px = x + (sx + 0.5) / samples;
+            const qx = Math.abs(px - 16) - inner;
+            const dist =
+              Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) +
+              Math.min(Math.max(qx, qy), 0) -
+              radius;
+
+            if (dist <= 0) {
+              sumAlpha += 1;
+              if (pointInPoly(px, py)) {
+                sumGray += 248; // Crisp platinum pointer
+              } else if (dist > -1.4) {
+                sumGray += 96; // Machined hairline bezel
+              } else {
+                sumGray += Math.round(24 - (py / size) * 12); // Matte obsidian fill
+              }
+            }
+          }
+        }
+
+        const idx = (y * size + x) * 4;
+        const premulGray = Math.round(sumGray / total);
+        const alpha = Math.round((sumAlpha / total) * 255);
+        // Monochrome (R = G = B) is byte-identical in Windows BGRA and macOS/Linux RGBA
+        buf[idx] = premulGray;
+        buf[idx + 1] = premulGray;
+        buf[idx + 2] = premulGray;
+        buf[idx + 3] = alpha;
+      }
+    }
+
+    const icon = nativeImage.createFromBitmap(buf, { width: size, height: size });
+    return icon.isEmpty() ? nativeImage.createEmpty() : icon;
+  } catch (_) {
+    return nativeImage.createEmpty();
+  }
+}
+
 function createTray() {
-  const icon = nativeImage.createEmpty();
+  const icon = createMonochromeTrayIcon();
   tray = new Tray(icon);
   tray.setToolTip("Cursor Companion");
+  tray.on("click", () => {
+    if (tray) tray.popUpContextMenu();
+  });
   rebuildTrayMenu();
 }
 

@@ -1,11 +1,11 @@
-# Cursor Companion (v3.1.0)
+# Cursor Companion (v3.1.1)
 
 **A lightweight, zero-focus AI desktop HUD for Windows — built for students, developers, and fast workflows.**
 
 No cluttered browser tabs, no heavy chat sidebars, and no ₹1,500/month subscriptions. Press a hotkey over any problem, equation, code snippet, or spreadsheet formula and get a verified answer right beside your cursor in ~1.5 seconds.
 
 🌐 **Official Website & Quick Start:** [burhanuddinkhandwala786.github.io/cursor-companion](https://burhanuddinkhandwala786.github.io/cursor-companion/)  
-⬇️ **Download Latest Windows Installer:** [Cursor Companion v3.1.0 (.exe)](https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest)
+⬇️ **Download Latest Windows Installer:** [Cursor Companion v3.1.1 (.exe)](https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest)
 
 ---
 
@@ -50,7 +50,7 @@ No cluttered browser tabs, no heavy chat sidebars, and no ₹1,500/month subscri
 
 ## Installation & Windows SmartScreen Note
 
-1. Download **`Cursor Companion Setup 3.1.0.exe`** from [Releases](https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest).
+1. Download **`Cursor Companion Setup 3.1.1.exe`** from [Releases](https://github.com/burhanuddinkhandwala786/cursor-companion/releases/latest).
 2. Because this is an independent, open-source student project without a paid $400/yr code-signing certificate, Windows SmartScreen may show *"Windows protected your PC"*. Click **More info → Run anyway** (you can inspect the full client source code in the `v3` branch and verify the VirusTotal scan link on the Release page).
 3. Cursor Companion runs quietly in your bottom-right **Windows System Tray**.
 

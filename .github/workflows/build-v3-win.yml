@@ -1,15 +1,13 @@
-name: Build Windows Release (V3.1)
+name: Build Windows Release (V3)
 
 on:
   push:
     branches:
-      - "v3.1-beta"
-    paths:
-      - "main.js"
-      - "preload.js"
-      - "index.html"
-      - "package.json"
-      - ".github/workflows/build-v3-win.yml"
+      - v3
+      - v3.1-beta
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
   workflow_dispatch:
 
 permissions:
@@ -18,36 +16,68 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout branch
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: 20
 
       - name: Install dependencies
-        run: npm install
+        shell: pwsh
+        run: npm install --no-audit --no-fund
 
-      - name: Verify JS syntax
+      - name: Syntax check client files
+        shell: pwsh
         run: |
           node --check main.js
-          node --check preload.js
+          if (Test-Path preload.js) { node --check preload.js }
 
-      - name: Package Windows executable
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-        run: npx electron-builder --win nsis --publish never
+      - name: Resolve release target from branch and package.json
+        id: meta
+        shell: pwsh
+        run: |
+          $pkg = Get-Content -Raw -Path package.json | ConvertFrom-Json
+          $ver = $pkg.version.Trim()
+          $branch = $env:GITHUB_REF_NAME
 
-      - name: Publish to v3.1.0-beta Pre-Release
+          if ($branch -eq "v3") {
+            "tag=v$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "release_name=Cursor Companion V$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "prerelease=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "make_latest=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "tag=v$ver-beta" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "release_name=Cursor Companion V$ver Beta" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "prerelease=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "make_latest=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Build Windows NSIS installer
+        shell: pwsh
+        run: npx electron-builder --win --x64 --publish never
+
+      - name: Verify installer and write SHA-256 summary
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Path dist -Filter "*.exe" | Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "No .exe installer found in dist/"
+            exit 1
+          }
+          $hash = (Get-FileHash -Path $exe.FullName -Algorithm SHA256).Hash.ToLower()
+          "### Windows Installer Built" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **File:** $($exe.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **Tag:** ${{ steps.meta.outputs.tag }}" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          "- **SHA-256:** ``$hash``" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Publish or update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.1.0-beta
-          name: Cursor Companion V3.1.0 Beta
-          prerelease: true
-          make_latest: "false"
-          files: |
-            dist/*.exe
-            dist/*.zip
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: ${{ steps.meta.outputs.release_name }}
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          make_latest: ${{ steps.meta.outputs.make_latest }}
+          files: dist/*.exe

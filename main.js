@@ -17,7 +17,7 @@ const path = require("path");
 const fs = require("fs");
 const https = require("https");
 const crypto = require("crypto");
-const { execFile } = require("child_process");
+const { spawn } = require("child_process");
 
 const BACKEND_URL = "https://study-buddy-brain.onrender.com";
 const GITHUB_RELEASES_API =
@@ -58,6 +58,7 @@ let lastWinX = -9999;
 let lastWinY = -9999;
 
 const failedShortcuts = new Set();
+const hardenedWindows = new WeakSet();
 
 process.on("uncaughtException", (err) => {
   console.error("Uncaught exception:", err && err.message ? err.message : err);
@@ -70,6 +71,243 @@ process.on("unhandledRejection", (reason) => {
   clearTimeout(busyWatchdog);
 });
 
+// ================= PERSISTENT ZERO-FOCUS WIN32 STEALTH WORKER =================
+const PS_WIN32_WORKER = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public static class CCWin32 {
+  [DllImport("user32.dll")]
+  public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+
+  [DllImport("user32.dll", SetLastError = true)]
+  public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+  private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+  [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
+  private static extern IntPtr GetWindowLong32(IntPtr hWnd, int nIndex);
+
+  [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+  private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+  [DllImport("user32.dll", EntryPoint = "SetWindowLongW", SetLastError = true)]
+  private static extern IntPtr SetWindowLong32(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
+  private static long GetExStyle(IntPtr hWnd) {
+    return (IntPtr.Size == 8 ? GetWindowLongPtr64(hWnd, -20) : GetWindowLong32(hWnd, -20)).ToInt64();
+  }
+
+  private static void SetExStyle(IntPtr hWnd, long style) {
+    IntPtr v = new IntPtr(style);
+    if (IntPtr.Size == 8) SetWindowLongPtr64(hWnd, -20, v);
+    else SetWindowLong32(hWnd, -20, v);
+  }
+
+  public static void MakeNoActivateOverlay(long hwndVal, bool clickThrough) {
+    if (hwndVal <= 0) return;
+    IntPtr h = new IntPtr(hwndVal);
+    long ex = GetExStyle(h);
+    ex |= 0x08000000L; // WS_EX_NOACTIVATE
+    ex |= 0x00000080L; // WS_EX_TOOLWINDOW
+    ex &= ~0x00040000L; // remove WS_EX_APPWINDOW
+    if (clickThrough) ex |= 0x00000020L; // WS_EX_TRANSPARENT
+    SetExStyle(h, ex);
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+    SetWindowPos(h, new IntPtr(-1), 0, 0, 0, 0, 0x0033);
+  }
+
+  public static void LiftTopmostNoActivate(long hwndVal) {
+    if (hwndVal <= 0) return;
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE
+    SetWindowPos(new IntPtr(hwndVal), new IntPtr(-1), 0, 0, 0, 0, 0x0013);
+  }
+
+  public static void SendCtrlKeyNoFocusLoss(byte vk) {
+    const uint KEYUP = 0x0002;
+    try {
+      // Press Ctrl BEFORE releasing Alt so Windows never fires solo-Alt menu activation
+      keybd_event(0x11, 0, 0, UIntPtr.Zero);
+      keybd_event(0x12, 0, KEYUP, UIntPtr.Zero);
+      keybd_event(0xA4, 0, KEYUP, UIntPtr.Zero);
+      keybd_event(0xA5, 0, KEYUP, UIntPtr.Zero);
+      keybd_event(0x10, 0, KEYUP, UIntPtr.Zero);
+      Thread.Sleep(22);
+      keybd_event(vk, 0, 0, UIntPtr.Zero);
+      Thread.Sleep(16);
+      keybd_event(vk, 0, KEYUP, UIntPtr.Zero);
+      Thread.Sleep(12);
+    } finally {
+      keybd_event(0x11, 0, KEYUP, UIntPtr.Zero);
+      keybd_event(0xA2, 0, KEYUP, UIntPtr.Zero);
+      keybd_event(0xA3, 0, KEYUP, UIntPtr.Zero);
+    }
+  }
+}
+'@
+
+[Console]::Out.WriteLine("READY")
+[Console]::Out.Flush()
+
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  $parts = $line.Trim().Split(" ")
+  $cmd = $parts[0]
+  try {
+    if ($cmd -eq "NOACTIVATE" -and $parts.Length -ge 2) {
+      $ct = ($parts.Length -ge 3 -and $parts[2] -eq "1")
+      [CCWin32]::MakeNoActivateOverlay([long]$parts[1], $ct)
+    } elseif ($cmd -eq "TOPMOST" -and $parts.Length -ge 2) {
+      [CCWin32]::LiftTopmostNoActivate([long]$parts[1])
+    } elseif ($cmd -eq "COPY") {
+      [CCWin32]::SendCtrlKeyNoFocusLoss(0x43)
+    } elseif ($cmd -eq "PASTE") {
+      [CCWin32]::SendCtrlKeyNoFocusLoss(0x56)
+    } elseif ($cmd -eq "EXIT") {
+      break
+    }
+    [Console]::Out.WriteLine("OK")
+  } catch {
+    [Console]::Out.WriteLine("ERR")
+  }
+  [Console]::Out.Flush()
+}
+`;
+
+let win32Worker = null;
+let win32Ready = false;
+let win32Queue = [];
+let win32Buf = "";
+
+function startWin32Worker() {
+  if (process.platform !== "win32" || win32Worker) return;
+  try {
+    const encoded = Buffer.from(PS_WIN32_WORKER, "utf16le").toString("base64");
+    const child = spawn(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
+      { windowsHide: true, stdio: ["pipe", "pipe", "ignore"] }
+    );
+    win32Worker = child;
+    win32Ready = false;
+    win32Buf = "";
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      win32Buf += chunk;
+      const lines = win32Buf.split(/\r?\n/);
+      win32Buf = lines.pop() || "";
+      for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        if (line === "READY") {
+          win32Ready = true;
+          flushWin32Queue();
+        } else if (win32Queue.length > 0 && win32Queue[0].sent) {
+          const item = win32Queue.shift();
+          clearTimeout(item.timer);
+          item.resolve(line === "OK");
+          flushWin32Queue();
+        }
+      }
+    });
+
+    child.on("exit", () => {
+      if (win32Worker === child) {
+        win32Worker = null;
+        win32Ready = false;
+      }
+      while (win32Queue.length) {
+        const item = win32Queue.shift();
+        clearTimeout(item.timer);
+        item.resolve(false);
+      }
+    });
+  } catch (_) {
+    win32Worker = null;
+    win32Ready = false;
+  }
+}
+
+function flushWin32Queue() {
+  if (!win32Worker || !win32Ready || !win32Queue.length || win32Queue[0].sent) return;
+  const item = win32Queue[0];
+  item.sent = true;
+  try {
+    win32Worker.stdin.write(item.cmd + "\n");
+  } catch (_) {
+    win32Queue.shift();
+    clearTimeout(item.timer);
+    item.resolve(false);
+    flushWin32Queue();
+  }
+}
+
+function sendWin32Cmd(cmd, timeoutMs = 1500) {
+  if (process.platform !== "win32") return Promise.resolve(false);
+  if (!win32Worker) startWin32Worker();
+  return new Promise((resolve) => {
+    const item = { cmd, sent: false, resolve, timer: null };
+    item.timer = setTimeout(() => {
+      const idx = win32Queue.indexOf(item);
+      if (idx !== -1) win32Queue.splice(idx, 1);
+      resolve(false);
+      flushWin32Queue();
+    }, timeoutMs);
+    win32Queue.push(item);
+    flushWin32Queue();
+  });
+}
+
+function stopWin32Worker() {
+  if (!win32Worker) return;
+  try {
+    win32Worker.stdin.write("EXIT\n");
+    win32Worker.kill();
+  } catch (_) {}
+  win32Worker = null;
+  win32Ready = false;
+}
+
+function getWinHwndNumber(win) {
+  if (!win || win.isDestroyed() || process.platform !== "win32") return 0;
+  try {
+    const b = win.getNativeWindowHandle();
+    if (!b || b.length < 4) return 0;
+    return b.length >= 8 ? Number(b.readBigUInt64LE(0)) : b.readUInt32LE(0);
+  } catch (_) {
+    return 0;
+  }
+}
+
+function applyNoActivateOverlay(win, clickThrough = true) {
+  const h = getWinHwndNumber(win);
+  if (h > 0) sendWin32Cmd(`NOACTIVATE ${h} ${clickThrough ? 1 : 0}`).catch(() => {});
+}
+
+function liftTopmostNoActivate(win) {
+  const h = getWinHwndNumber(win);
+  if (h > 0) sendWin32Cmd(`TOPMOST ${h}`).catch(() => {});
+}
+
+async function readClipText() {
+  try {
+    const val = await Promise.resolve(clipboard.readText());
+    return typeof val === "string" ? val : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+async function writeClipText(text) {
+  try {
+    await Promise.resolve(clipboard.writeText(String(text || "")));
+  } catch (_) {}
+}
+
+// ================= SHORTCUTS & SETTINGS =================
 const DEFAULT_SHORTCUTS = {
   smartScan: "F8",
   smartScanAlt: "Alt+A",
@@ -418,7 +656,7 @@ function isNewerVersion(remoteVer, currentVer) {
 }
 
 function getUpdateInfo() {
-  const currentVersion = cleanVersionString(app.getVersion() || "3.1.1");
+  const currentVersion = cleanVersionString(app.getVersion() || "3.1.2");
   const latest = cleanVersionString(remoteConfig.latest_version || "");
   const available = isNewerVersion(latest, currentVersion);
   return {
@@ -436,6 +674,8 @@ function hardenWindow(win) {
   try {
     win.setContentProtection(true);
   } catch (_) {}
+  if (hardenedWindows.has(win)) return;
+  hardenedWindows.add(win);
   try {
     win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     win.webContents.on("will-navigate", (e) => e.preventDefault());
@@ -631,7 +871,7 @@ async function syncRemoteConfigAndUpdates(manual = false) {
     const gh = await httpsGetJson(GITHUB_RELEASES_API, 8000);
     if (gh && typeof gh === "object" && gh.tag_name) {
       const ghVer = cleanVersionString(gh.tag_name);
-      if (isNewerVersion(ghVer, remoteConfig.latest_version || app.getVersion() || "3.1.1")) {
+      if (isNewerVersion(ghVer, remoteConfig.latest_version || app.getVersion() || "3.1.2")) {
         mergeRemoteConfig({
           latest_version: ghVer,
           release_url:
@@ -1038,6 +1278,7 @@ async function postJsonWithJitterRetry(endpoint, payload, retries = 0) {
   throw new Error("Request failed");
 }
 
+// ================= ZERO-FOCUS WINDOWS =================
 function createHudWindow() {
   const win = new BrowserWindow({
     width: 68,
@@ -1067,6 +1308,7 @@ function createHudWindow() {
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setIgnoreMouseEvents(true, { forward: true });
   hardenWindow(win);
+  applyNoActivateOverlay(win, true);
 
   win.webContents.on("did-finish-load", () => {
     if (!win.isDestroyed() && pendingHudState) {
@@ -1147,9 +1389,6 @@ function showHud(payload, autoHideMs = 0) {
     : Math.max(152, Math.min(460, Math.round(textLen * 7.6 + extraWidth)));
   lockedH = 34;
 
-  hudWin.setFocusable(false);
-  hudWin.setIgnoreMouseEvents(true, { forward: true });
-
   lastWinX = -9999;
   lastWinY = -9999;
 
@@ -1167,9 +1406,7 @@ function showHud(payload, autoHideMs = 0) {
     hudWin.showInactive();
   }
   enforceCaptureInvisibility(hudWin);
-  try {
-    hudWin.moveTop();
-  } catch (_) {}
+  liftTopmostNoActivate(hudWin);
 
   snapToCursor(true);
   syncEscapeShortcut();
@@ -1309,9 +1546,7 @@ function toggleSidecar() {
     sidecarWin.setBounds({ x, y, width, height });
     sidecarWin.showInactive();
     enforceCaptureInvisibility(sidecarWin);
-    try {
-      sidecarWin.moveTop();
-    } catch (_) {}
+    liftTopmostNoActivate(sidecarWin);
     syncEscapeShortcut();
     syncSidecar();
     return;
@@ -1346,14 +1581,13 @@ function toggleSidecar() {
   win.setAlwaysOnTop(true, "screen-saver");
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   hardenWindow(win);
+  applyNoActivateOverlay(win, false);
 
   win.webContents.once("did-finish-load", () => {
     if (win.isDestroyed()) return;
     win.showInactive();
     enforceCaptureInvisibility(win);
-    try {
-      win.moveTop();
-    } catch (_) {}
+    liftTopmostNoActivate(win);
     syncEscapeShortcut();
     syncSidecar();
   });
@@ -1379,13 +1613,13 @@ function syncSidecar() {
       history,
       activeIdx: historyIdx,
       hasUserKey: Boolean(settings.userApiKey),
-      appVersion: cleanVersionString(app.getVersion() || "3.1.1"),
+      appVersion: cleanVersionString(app.getVersion() || "3.1.2"),
       updateInfo: getUpdateInfo(),
     });
   }
 }
 
-// --- Frameless Obsidian Shortcut Studio (Apple / Mercedes / Tesla Aesthetic) ---
+// --- Frameless Obsidian Shortcut Studio ---
 function ensureShortcutEditorAssets() {
   const preloadCode = [
     'const { contextBridge, ipcRenderer } = require("electron");',
@@ -1456,7 +1690,7 @@ function ensureShortcutEditorAssets() {
     "      <button class='btn' id='resetBtn' type='button'>Reset Defaults</button>",
     "      <div style='display:flex;gap:8px'>",
     "        <button class='btn' id='closeBtn' type='button'>Cancel</button>",
-    "        <button class='btn primary' id='saveBtn' type='button'>Save &amp; Apply</button>",
+    "        <button class='btn primary' id='saveBtn' type='button'>Save & Apply</button>",
     "      </div>",
     "    </div>",
     "  </div>",
@@ -1615,6 +1849,7 @@ function openShortcutEditor() {
   win.loadFile(SHORTCUT_HTML_PATH);
 }
 
+// ================= CAPTURE & ZERO-FOCUS SELECTION =================
 async function captureDisplayNative(display) {
   const sf = display.scaleFactor || 1;
   const sources = await desktopCapturer.getSources({
@@ -1699,112 +1934,45 @@ async function captureBetweenPointsBuffer(p1, p2) {
   return image.crop({ x, y, width: w, height: h }).toJPEG(80);
 }
 
-function grabSelectedTextDirectly() {
-  if (process.platform !== "win32") {
-    return Promise.resolve("");
+async function grabSelectedTextDirectly() {
+  if (process.platform !== "win32") return "";
+
+  const sentinel = `__CC_WAIT_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
+  const prev = await readClipText();
+  await writeClipText(sentinel);
+
+  await sendWin32Cmd("COPY", 1200);
+
+  let captured = "";
+  for (let i = 0; i < 24; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const current = await readClipText();
+    if (current && current !== sentinel) {
+      captured = current.trim();
+      break;
+    }
   }
 
-  return new Promise((resolve) => {
-    const sentinel = `__CC_WAIT_${Date.now()}_${Math.random().toString(36).slice(2)}__`;
-    const prev = clipboard.readText();
-    let settled = false;
-    let psExitedAt = 0;
-
-    clipboard.writeText(sentinel);
-
-    const ps = `
-Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace U;
-try {
-  [U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0x10, 0, 2, [UIntPtr]::Zero);
-  Start-Sleep -Milliseconds 30;
-  [U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0x43, 0, 0, [UIntPtr]::Zero);
-  Start-Sleep -Milliseconds 15;
-} finally {
-  [U.K]::keybd_event(0x43, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0xA2, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0xA3, 0, 2, [UIntPtr]::Zero);
-}
-`;
-
-    execFile(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-      { windowsHide: true },
-      () => {
-        psExitedAt = Date.now();
-      }
-    );
-
-    const finish = (val) => {
-      if (settled) return;
-      settled = true;
-      clearInterval(poll);
-      setTimeout(() => {
-        try {
-          clipboard.writeText(prev);
-        } catch (_) {}
-        resolve(val);
-      }, 35);
-    };
-
-    let checks = 0;
-    const poll = setInterval(() => {
-      checks++;
-      const current = clipboard.readText();
-      if (current && current !== sentinel) {
-        finish(current.trim());
-      } else if (psExitedAt > 0 && Date.now() - psExitedAt > 140) {
-        finish("");
-      } else if (checks >= 72) {
-        finish("");
-      }
-    }, 25);
-  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await writeClipText(prev);
+  return captured;
 }
 
-function ghostPasteActiveValue() {
+async function ghostPasteActiveValue() {
   const current = history[historyIdx];
   const textToPaste =
     (current && (current.copy_value || current.cursor_pill)) || "";
 
   if (!textToPaste) return;
 
-  clipboard.writeText(String(textToPaste));
+  await writeClipText(String(textToPaste));
+  if (process.platform === "win32") {
+    await sendWin32Cmd("PASTE", 1200);
+  }
   showHud({ ...current, cursor_pill: "Pasted ✓" }, 1400);
-
-  if (process.platform !== "win32") return;
-
-  const ps = `
-Add-Type -MemberDefinition '[DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);' -Name K -Namespace U;
-try {
-  [U.K]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0xA5, 0, 2, [UIntPtr]::Zero);
-  Start-Sleep -Milliseconds 35;
-  [U.K]::keybd_event(0x11, 0, 0, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0x56, 0, 0, [UIntPtr]::Zero);
-  Start-Sleep -Milliseconds 15;
-} finally {
-  [U.K]::keybd_event(0x56, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0x11, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0xA2, 0, 2, [UIntPtr]::Zero);
-  [U.K]::keybd_event(0xA3, 0, 2, [UIntPtr]::Zero);
-}
-`;
-
-  execFile(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps],
-    { windowsHide: true },
-    () => {}
-  );
 }
 
+// ================= ANALYSIS PIPELINE =================
 async function runAnalysisPipeline({
   textContent,
   imageBase64,
@@ -1987,9 +2155,11 @@ async function handleTextAction(actionMode = "solve") {
   const t0 = Date.now();
 
   try {
-    showHud({ mode: "loading", cursor_pill: "•••" });
+    // Copy highlighted text BEFORE displaying the HUD so active selection stays blue
     const selected = await grabSelectedTextDirectly();
     if (activeRequestId !== reqId) return;
+
+    showHud({ mode: "loading", cursor_pill: "•••" });
 
     let res;
     let sourceLabel = selected;
@@ -2063,7 +2233,7 @@ function handleResult(res, elapsed, sourceContext) {
   };
 
   if (settings.autoCopy && res.copy_value && !isUnclear) {
-    clipboard.writeText(String(res.copy_value));
+    writeClipText(String(res.copy_value));
   }
 
   lastContextSummary = `${context}\nAnswer: ${res.cursor_pill}`.trim();
@@ -2161,7 +2331,6 @@ ipcMain.on("hud-save-key", async (_event, key) => {
         device_id: settings.deviceId,
       });
 
-      // Fail-safe fallback if backend only has the legacy single-key endpoint
       if (!resp || resp.detail === "Not Found") {
         let added = 0;
         let lastMsg = "";
@@ -2278,7 +2447,7 @@ ipcMain.on("hud-save-key", async (_event, key) => {
 
 ipcMain.on("hud-copy", (_event, text) => {
   if (typeof text === "string" && text) {
-    clipboard.writeText(text);
+    writeClipText(text);
   }
 });
 
@@ -2560,11 +2729,11 @@ function createMonochromeTrayIcon() {
             if (dist <= 0) {
               sumAlpha += 1;
               if (pointInPoly(px, py)) {
-                sumGray += 248; // Crisp platinum pointer
+                sumGray += 248;
               } else if (dist > -1.4) {
-                sumGray += 96; // Machined hairline bezel
+                sumGray += 96;
               } else {
-                sumGray += Math.round(24 - (py / size) * 12); // Matte obsidian fill
+                sumGray += Math.round(24 - (py / size) * 12);
               }
             }
           }
@@ -2573,7 +2742,6 @@ function createMonochromeTrayIcon() {
         const idx = (y * size + x) * 4;
         const premulGray = Math.round(sumGray / total);
         const alpha = Math.round((sumAlpha / total) * 255);
-        // Monochrome (R = G = B) is byte-identical in Windows BGRA and macOS/Linux RGBA
         buf[idx] = premulGray;
         buf[idx + 1] = premulGray;
         buf[idx + 2] = premulGray;
@@ -2611,6 +2779,7 @@ if (!gotSingleInstanceLock) {
       settings = loadSettings();
       saveSettings({});
 
+      startWin32Worker();
       createHudWindow();
       registerAllShortcuts();
       createTray();
@@ -2624,6 +2793,10 @@ if (!gotSingleInstanceLock) {
     });
 }
 
+app.on("window-all-closed", (e) => {
+  e.preventDefault();
+});
+
 app.on("will-quit", () => {
   clearTimeout(hideTimer);
   clearTimeout(busyWatchdog);
@@ -2631,4 +2804,5 @@ app.on("will-quit", () => {
   clearInterval(updateCheckTimer);
   stopCursorFollow();
   globalShortcut.unregisterAll();
+  stopWin32Worker();
 });
